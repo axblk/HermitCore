@@ -25,6 +25,7 @@ extern crate nix;
 
 #[macro_use]
 extern crate log;
+extern crate env_logger;
 
 mod hermit;
 
@@ -55,6 +56,8 @@ fn create_isle(path: String, specs: IsleParameter) -> Result<Box<Isle>> {
 }
 
 fn main() {
+    env_logger::init();
+
     let matches = clap_app!(HermitProxy => 
         (version: "0.0.1")
         (author: "Lorenz Schmidt <bytesnake@mailbox.org>")
