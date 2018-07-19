@@ -19,7 +19,7 @@ pub struct IsleParameterQEmu {
     binary: String,
     use_kvm: bool,
     monitor: bool,
-    capture_net:bool,
+    capture_net: bool,
     port: u16,
     should_debug: bool,
     app_port: u16
@@ -62,13 +62,13 @@ impl IsleParameter {
                 }
             },
             _ => {
-                let binary = env::var("HERMIT_BINARY").unwrap_or("qemu-system-x86_64".into());
-                let kvm = env::var("HERMIT_KVM").map(|x| x.parse().unwrap_or(true)).unwrap_or(true);
-                let monitor = env::var("HERMIT_MONITOR").map(|x| x.parse().unwrap_or(false)).unwrap_or(false);
-                let capture_net = env::var("HERMIT_CAPTURE_NET").map(|x| x.parse().unwrap_or(false)).unwrap_or(false);
-                let port = env::var("HERMIT_PORT").map(|x| x.parse().unwrap_or(18766)).unwrap_or(18766);
+                let binary = env::var("HERMIT_QEMU").unwrap_or("qemu-system-x86_64".into());
+                let kvm = env::var("HERMIT_KVM").map(|x| x.parse::<i32>().unwrap_or(1) != 0).unwrap_or(true);
+                let monitor = env::var("HERMIT_MONITOR").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
+                let capture_net = env::var("HERMIT_CAPTURE_NET").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
+                let port = env::var("HERMIT_PORT").map(|x| x.parse().unwrap_or(0)).unwrap_or(0);
                 let app_port = env::var("HERMIT_APP_PORT").map(|x| x.parse().unwrap_or(0)).unwrap_or(0);
-                let debug = env::var("HERMIT_DEBUG").map(|x| x.parse().unwrap_or(false)).unwrap_or(false);
+                let debug = env::var("HERMIT_DEBUG").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
 
                 IsleParameter::QEmu {
                     mem_size: mem_size,
@@ -78,7 +78,7 @@ impl IsleParameter {
                         use_kvm: kvm,
                         monitor: monitor,
                         capture_net: capture_net,
-                        port:port,
+                        port: port,
                         app_port: app_port,
                         should_debug: debug
                     }
