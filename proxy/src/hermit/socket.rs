@@ -9,7 +9,6 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::os::unix::net::UnixStream;
-use bincode::{serialize, deserialize, Infinite};
 
 use hermit::proto;
 use hermit::proto::Packet;
@@ -20,12 +19,6 @@ use libc;
 const HERMIT_MAGIC: u32 = 0x7E317;
 
 pub type Console = Arc<Mutex<Vec<UnixStream>>>;
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ActionResult {
-    Output(String),
-    OutputErr(String)
-}
 
 #[derive(Debug)]
 pub struct Socket {
@@ -124,34 +117,22 @@ impl Socket {
                     match packet {
                         Packet::Exit { arg } => break 'main,
                         Packet::Write { fd, buf } => {
-                            let mut buf_ret: [u8; 8];
-                            if fd != 1 && fd != 2 {
-                                buf_ret = transmute(libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()).to_le());
-                            } else {
-                                let res = match fd {
-                                    1 => ActionResult::Output(String::from_utf8_unchecked(buf)),
-                                    2 => ActionResult::OutputErr(String::from_utf8_unchecked(buf)),
-                                    _ => unreachable!()
-                                };
-
-                                let buf: Vec<u8> = serialize(&res, Infinite).unwrap();
-
-                                // try to send the new console log to each endpoint and retain only
-                                // the successfully ones.
-                                self.console.lock().unwrap().retain(|mut x| x.write(&buf).is_ok());
-
-                                buf_ret = transmute(buf.len());
+                            let mut buf_ret: [u8; 8] = transmute(libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()).to_le());
+                            if fd > 2 {
+                                stream.write(&buf_ret);
                             }
-
-                            stream.write(&buf_ret);
                         },
                         Packet::Open { name, mode, flags } => {
                             let mut buf: [u8; 4] = transmute(libc::open(name.as_ptr(), flags as i32, mode as i32).to_le());
                             let written = stream.write(&buf).unwrap();
-                                
                         },
                         Packet::Close { fd } => {
-                            let buf: [u8; 4] = transmute(libc::close(fd).to_le());
+                            let res = match fd {
+                                n if n > 2 => libc::close(fd),
+                                _ => 0
+                            };
+                                
+                            let buf: [u8; 4] = transmute(res.to_le());
                             stream.write(&buf);
                         },
                         Packet::Read { fd, len } => {
@@ -162,7 +143,7 @@ impl Socket {
                             stream.write(&buf);
 
                             if got > 0 {
-                                stream.write(&tmp[..]);
+                                stream.write(&tmp[0 .. (got as usize)]);
                             }
                         },
                         Packet::LSeek { fd, offset, whence } => {
