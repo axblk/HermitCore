@@ -5,43 +5,103 @@ use libc;
 use std::io::Cursor;
 use memmap::{Mmap, MmapMut};
 use elf;
-use elf::types::{ELFCLASS64, OSABI, PT_LOAD};
+use elf::types::{ELFCLASS64, OSABI, PT_LOAD, ET_EXEC, EM_X86_64};
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::ptr;
 use std::fs::File;
+use std::io::{BufReader, Read};
+
+use byteorder::{ReadBytesExt, NativeEndian};
 
 use hermit::is_verbose;
 use hermit::IsleParameterUhyve;
 use hermit::utils;
 use hermit::uhyve;
-use super::kvm_header::{kvm_userspace_memory_region, KVM_CAP_SYNC_MMU, kvm_sregs};
+use super::kvm_header::*;
 use super::{Result, Error, NameIOCTL};
 use super::vcpu::{ExitCode, VirtualCPU};
 use super::proto::PORT_UART;
+use super::checkpoint::{CheckpointConfig, vcpu_state};
+use super::migration::MigrationServer;
 
 pub const KVM_32BIT_MAX_MEM_SIZE:   usize = 1 << 32;
 pub const KVM_32BIT_GAP_SIZE:       usize = 768 << 20;
 pub const KVM_32BIT_GAP_START:      usize = KVM_32BIT_MAX_MEM_SIZE - KVM_32BIT_GAP_SIZE;
 
-//use byteorder::ByteOrder;
+/// Page offset bits
+pub const PAGE_BITS:        usize = 12;
+pub const PAGE_2M_BITS:     usize = 21;
+pub const PAGE_SIZE:        usize = 1 << PAGE_BITS;
+/// Mask the page address without page map flags and XD flag
+
+pub const PAGE_MASK:        u32 = ((!0u64) << PAGE_BITS) as u32 & !PG_XD;
+pub const PAGE_2M_MASK:     u32 = ((!0u64) << PAGE_2M_BITS) as u32 & !PG_XD;
+
+// Page is present
+pub const PG_PRESENT:	    u32 = 1 << 0;
+// Page is read- and writable
+pub const PG_RW:			u32 = 1 << 1;
+// Page is addressable from userspace
+pub const PG_USER:			u32 = 1 << 2;
+// Page write through is activated
+pub const PG_PWT:			u32 = 1 << 3;
+// Page cache is disabled
+pub const PG_PCD:			u32 = 1 << 4;
+// Page was recently accessed (set by CPU)
+pub const PG_ACCESSED:		u32 = 1 << 5;
+// Page is dirty due to recent write-access (set by CPU)
+pub const PG_DIRTY:		    u32 = 1 << 6;
+// Huge page: 4MB (or 2MB, 1GB)
+pub const PG_PSE:			u32 = 1 << 7;
+// Page attribute table
+pub const PG_PAT:			u32 = PG_PSE;
+
+/* @brief Global TLB entry (Pentium Pro and later)
+ *
+ * HermitCore is a single-address space operating system
+ * => CR3 never changed => The flag isn't required for HermitCore
+ */
+pub const PG_GLOBAL:	    u32 = 0;
+
+// This table is a self-reference and should skipped by page_map_copy()
+pub const PG_SELF:			u32 = 1 << 9;
+
+/// Disable execution for this page
+pub const PG_XD:            u32 = 0; //(1u32 << 63);
+
 // guest offset?
 //pub const GUEST_OFFSET = 0;
+
+#[derive(Default, Clone)]
+pub struct KVMExtensions {
+    pub cap_tsc_deadline: bool,
+	pub cap_irqchip: bool,
+	pub cap_adjust_clock_stable: bool,
+	pub cap_irqfd: bool,
+	pub cap_vapic: bool,
+}
 
 pub struct VirtualMachine {
     kvm_fd: libc::c_int,
     vm_fd: libc::c_int,
     mem: MmapMut,
-    elf_header: Option<elf::types::FileHeader>,
+    elf_entry: Option<u64>,
     klog: Option<*const i8>,
     mboot: Option<*mut u8>,
     vcpus: Vec<VirtualCPU>,
     num_cpus: u32,
     sregs: kvm_sregs,
     running_state: Arc<AtomicBool>,
-    thread_handles: Vec<JoinHandle<ExitCode>>
+    thread_handles: Vec<JoinHandle<ExitCode>>,
+    extensions: KVMExtensions
+}
+
+fn determine_dest_offset(src_addr: isize) -> isize {
+    let mask = if src_addr & PG_PSE as isize != 0 { PAGE_2M_MASK } else { PAGE_MASK };
+	src_addr & mask as isize
 }
 
 impl VirtualMachine {
@@ -60,7 +120,20 @@ impl VirtualMachine {
             unsafe { libc::mprotect((mem.as_mut_ptr() as *mut libc::c_void).offset(KVM_32BIT_GAP_START as isize), KVM_32BIT_GAP_START, libc::PROT_NONE); }
         }
         
-        Ok(VirtualMachine { kvm_fd: kvm_fd, vm_fd: fd, mem: mem, elf_header: None, klog: None, vcpus: Vec::new(), mboot: None, num_cpus: num_cpus, sregs: kvm_sregs::default(), running_state: Arc::new(AtomicBool::new(false)), thread_handles: Vec::new() })
+        Ok(VirtualMachine {
+            kvm_fd: kvm_fd,
+            vm_fd: fd,
+            mem: mem,
+            elf_entry: None,
+            klog: None,
+            vcpus: Vec::new(),
+            mboot: None,
+            num_cpus: num_cpus,
+            sregs: kvm_sregs::default(),
+            running_state: Arc::new(AtomicBool::new(false)),
+            thread_handles: Vec::new(),
+            extensions: KVMExtensions::default()
+        })
     }
 
     /// Loads a kernel from path and initialite mem and elf_entry
@@ -72,25 +145,32 @@ impl VirtualMachine {
         let file = unsafe { Mmap::map(&kernel_file) }.map_err(|_| Error::InvalidFile(path.into()))? ;
 
         // parse the header with ELF module
-        let file_efi = {
+        let file_elf = {
             let mut data = Cursor::new(file.as_ref());
             
             elf::File::open_stream(&mut data)
                 .map_err(|_| Error::InvalidFile(path.into()))
         }?;
 
-        if file_efi.ehdr.class != ELFCLASS64 ||  file_efi.ehdr.osabi != OSABI(0x42) {
+        if file_elf.ehdr.class != ELFCLASS64
+            || file_elf.ehdr.osabi != OSABI(0x42)
+            || file_elf.ehdr.elftype != ET_EXEC
+            || file_elf.ehdr.machine != EM_X86_64 {
             return Err(Error::InvalidFile(path.into()));
         }
 
-        self.elf_header = Some(file_efi.ehdr);
+        self.elf_entry = Some(file_elf.ehdr.entry);
+
+        let mem_addr = self.mem.as_ptr() as u64;
 
         // acquire the slices of the user memory and kernel file
         let vm_mem_length = self.mem.len() as u64;
         let vm_mem = self.mem.as_mut();
         let kernel_file  = file.as_ref();
 
-        for header in file_efi.phdrs {
+        let mut first_load = true;
+
+        for header in file_elf.phdrs {
             if header.progtype != PT_LOAD {
                 continue;
             }
@@ -112,12 +192,19 @@ impl VirtualMachine {
             let ptr = vm_mem[vm_start..vm_end].as_mut_ptr();
 
             unsafe {
+                *(ptr.offset(0x38) as *mut u64) += header.memsz; // total kernel size
+
+                if !first_load {
+                    continue;
+                }
+
+                first_load = false;
+
                 *(ptr.offset(0x08) as *mut u64) = header.paddr;   // physical start addr
                 *(ptr.offset(0x10) as *mut u64) = vm_mem_length;  // physical size limit
                 *(ptr.offset(0x18) as *mut u32) = utils::cpufreq()?; // CPU frequency
                 *(ptr.offset(0x24) as *mut u32) = 1;              // number of used CPUs
                 *(ptr.offset(0x30) as *mut u32) = 0;              // apicid (?)
-                *(ptr.offset(0x38) as *mut u64) = header.memsz;  // 
                 *(ptr.offset(0x60) as *mut u32) = 1;              // NUMA nodes
                 *(ptr.offset(0x94) as *mut u32) = 1;              // announce uhyve
                 if is_verbose() {
@@ -148,12 +235,80 @@ impl VirtualMachine {
                     *(ptr.offset(0xBB) as *mut u8) = data[3];
                 }
 
+                *(ptr.offset(0xBC) as *mut u64) = mem_addr;
+
                 self.klog = Some(vm_mem.as_ptr().offset(header.paddr as isize + 0x5000) as *const i8);
                 self.mboot = Some(vm_mem.as_mut_ptr().offset(header.paddr as isize) as *mut u8);
             }
         }
 
         debug!("Kernel loaded");
+
+        Ok(())
+    }
+
+    pub fn load_checkpoint(&mut self, chk: &CheckpointConfig) -> Result<()> {
+        unsafe {
+            self.klog = Some(self.mem.as_ptr().offset(chk.get_elf_entry() as isize + 0x5000) as *const i8);
+            self.mboot = Some(self.mem.as_mut_ptr().offset(chk.get_elf_entry() as isize) as *mut u8);
+        }
+
+        let chk_num = chk.get_checkpoint_number();
+        let start = if chk.get_full() { chk_num } else { 0 };
+
+        for i in start .. chk_num+1 {
+            let file_name = format!("checkpoint/chk{}_mem.dat", i);
+            let file = File::open(&file_name).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+            let mut reader = BufReader::new(file);
+            
+            let mut clock = kvm_clock_data::default();
+            reader.read_exact(unsafe { utils::any_as_u8_slice(&mut clock) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+
+            if self.extensions.cap_adjust_clock_stable && i == chk_num {
+                let mut data = kvm_clock_data::default();
+                data.clock = clock.clock;
+
+                let _ = self.set_clock(data);
+            }
+
+            while let Ok(location) = reader.read_i64::<NativeEndian>() {
+                let location = location as isize;
+                let dest_addr = unsafe { self.mem.as_mut_ptr().offset(determine_dest_offset(location)) };
+                let len = if location & PG_PSE as isize != 0 { 1 << PAGE_2M_BITS } else { 1 << PAGE_BITS };
+                let dest = unsafe { ::std::slice::from_raw_parts_mut(dest_addr, len) };
+                reader.read_exact(dest).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+            }
+        }
+
+        debug!("Loaded checkpoint {}", chk_num);
+
+        Ok(())
+    }
+
+    pub fn load_migration(&mut self, mig: &mut MigrationServer) -> Result<()> {
+        unsafe {
+            let entry = mig.get_metadata().get_elf_entry();
+            self.klog = Some(self.mem.as_ptr().offset(entry as isize + 0x5000) as *const i8);
+            self.mboot = Some(self.mem.as_mut_ptr().offset(entry as isize) as *mut u8);
+        }
+
+        mig.recv_data(self.mem.as_mut())?;
+        debug!("Guest memory received");
+
+        mig.recv_cpu_states()?;
+        debug!("CPU states received");
+
+        if self.extensions.cap_adjust_clock_stable {
+            let mut clock = kvm_clock_data::default();
+            mig.recv_data(unsafe { utils::any_as_u8_slice(&mut clock) })?;
+
+            let mut data = kvm_clock_data::default();
+            data.clock = clock.clock;
+
+            let _ = self.set_clock(data);
+        }
+
+        debug!("Loaded migration");
 
         Ok(())
     }
@@ -165,14 +320,17 @@ impl VirtualMachine {
         if let Ok(true) = self.check_extension(KVM_CAP_SYNC_MMU) {
             identity_base = 0xfeffc000;
 
-            self.set_tss_identity(identity_base)?;
+            self.set_identity_map_addr(identity_base)?;
         }
         
         self.set_tss_addr(identity_base+0x1000)?;
 
-        let start_ptr = self.mem.as_ptr() as u64;
         let mut kvm_region = kvm_userspace_memory_region {
-            slot: 0, guest_phys_addr: 0, flags: 0, memory_size: self.mem_size() as u64, userspace_addr: start_ptr
+            slot: 0,
+            guest_phys_addr: 0,
+            flags: 0,
+            memory_size: self.mem_size() as u64,
+            userspace_addr: self.mem.as_ptr() as u64
         };
 
         if self.mem_size() <= KVM_32BIT_GAP_START {
@@ -189,13 +347,84 @@ impl VirtualMachine {
 
         self.create_irqchip()?;
 
+        // KVM_CAP_X2APIC_API
+        let mut cap = kvm_enable_cap::default();
+        cap.cap = KVM_CAP_X2APIC_API;
+        cap.args[0] = (KVM_X2APIC_API_USE_32BIT_IDS|KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK) as u64;
+        self.enable_cap(cap)?;
+
+        let mut chip = kvm_irqchip::default();
+        chip.chip_id = KVM_IRQCHIP_IOAPIC;
+
+        let mut chip = kvm_irqchip::default();
+        self.get_irqchip(&mut chip)?;
+        for i in 0 .. KVM_IOAPIC_NUM_PINS as usize {
+            unsafe {
+            chip.chip.ioapic.redirtbl[i].fields.vector = 0x20+i as u8;
+            chip.chip.ioapic.redirtbl[i].fields._bitfield_1 = kvm_ioapic_state__bindgen_ty_1__bindgen_ty_1::new_bitfield_1(
+                0, // delivery_mode
+                0, // dest_mode
+                0, // delivery_status
+                0, // polarity
+                0, // remote_irr
+                0, // trig_mode
+                if i != 2 { 0 } else { 1 }, // mask
+                0, // reserve
+            );
+            chip.chip.ioapic.redirtbl[i].fields.dest_id = 0;
+            }
+        }
+        self.set_irqchip(chip)?;
+
+        self.extensions.cap_tsc_deadline = self.check_extension(KVM_CAP_TSC_DEADLINE_TIMER)?;
+        self.extensions.cap_irqchip = self.check_extension(KVM_CAP_IRQCHIP)?;
+        self.extensions.cap_adjust_clock_stable = self.check_extension_int(KVM_CAP_ADJUST_CLOCK)? == KVM_CLOCK_TSC_STABLE as i32;
+        self.extensions.cap_irqfd = self.check_extension(KVM_CAP_IRQFD)?;
+        self.extensions.cap_vapic = self.check_extension(KVM_CAP_VAPIC)?;
+
+        if !self.extensions.cap_irqfd {
+            return Err(Error::CAPIRQFD)
+        }
+
+        Ok(())
+    }
+
+    pub fn create_cpus(&mut self) -> Result<()> {
         for i in 0..self.num_cpus {
             self.create_vcpu(i as u32)?;
         }
 
         Ok(())
     }
-    
+
+    pub fn init_cpus(&mut self) -> Result<()> {
+        let entry = self.elf_entry.ok_or(Error::KernelNotLoaded)?;
+
+        for cpu in &self.vcpus {
+            cpu.init(entry)?;
+
+            if cpu.get_id() == 0 {
+                self.sregs = cpu.init_sregs()?;
+            }
+
+            cpu.set_sregs(self.sregs)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn restore_cpus(&mut self, cpu_states: &mut Vec<vcpu_state>) -> Result<()> {
+        if cpu_states.len() < self.vcpus.len() {
+            return Err(Error::VCPUStatesNotInitialized)
+        }
+
+        for cpu in &self.vcpus {
+            cpu.restore_cpu_state(&mut cpu_states[cpu.get_id() as usize])?;
+        }
+
+        Ok(())
+    }
+
     pub fn set_user_memory_region(&self, mut region: kvm_userspace_memory_region) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_user_memory_region(self.vm_fd, (&mut region) as *mut kvm_userspace_memory_region)
@@ -211,13 +440,17 @@ impl VirtualMachine {
     }
 
     pub fn check_extension(&self, extension: u32) -> Result<bool> {
+        self.check_extension_int(extension).map(|x| x > 0)
+    }
+
+    pub fn check_extension_int(&self, extension: u32) -> Result<i32> {
         unsafe {
             uhyve::ioctl::check_extension(self.vm_fd, extension as *mut u8)
-                .map_err(|_| Error::IOCTL(NameIOCTL::CheckExtension)).map(|x| x > 0)
+                .map_err(|_| Error::IOCTL(NameIOCTL::CheckExtension))
         }
     }
 
-    pub fn set_tss_identity(&self, identity_base: u64) -> Result<()> {
+    pub fn set_identity_map_addr(&self, identity_base: u64) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_identity_map_addr(self.vm_fd, (&identity_base) as *const u64)
                 .map_err(|_| Error::IOCTL(NameIOCTL::SetTssIdentity)).map(|_| ())
@@ -231,20 +464,43 @@ impl VirtualMachine {
         }
     }
 
-    pub fn create_vcpu(&mut self, id: u32) -> Result<()> {
-        let entry = self.elf_header.ok_or(Error::KernelNotLoaded)?.entry;
+    pub fn enable_cap(&self, mut region: kvm_enable_cap) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::enable_cap(self.vm_fd, (&mut region) as *mut kvm_enable_cap)
+                .map_err(|_| Error::IOCTL(NameIOCTL::EnableCap)).map(|_| ())
+        }
+    }
 
-        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, entry, &mut self.mem, self.mboot.unwrap(), self.running_state.clone())?;
-
-        if id == 0 {
-            self.sregs = cpu.init_sregs()?;
+    fn get_irqchip(&self, chip: &mut kvm_irqchip) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::get_irqchip(self.vm_fd, chip as *mut kvm_irqchip)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetIRQChip))?;
         }
 
-        cpu.set_sregs(self.sregs)?;
-        
-        let id = id as usize;
+        Ok(())
+    }
 
-        self.vcpus.insert(id, cpu);
+    pub fn set_irqchip(&self, mut chip: kvm_irqchip) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_irqchip(self.vm_fd, (&mut chip) as *mut kvm_irqchip)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetIRQChip))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn set_clock(&self, mut clock: kvm_clock_data) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_clock(self.vm_fd, (&mut clock) as *mut kvm_clock_data)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetClock))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn create_vcpu(&mut self, id: u32) -> Result<()> {
+        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, &mut self.mem, self.mboot.unwrap(), self.running_state.clone(), self.extensions.clone())?;
+        self.vcpus.insert(id as usize, cpu);
 
         Ok(())
     }
@@ -298,11 +554,7 @@ impl VirtualMachine {
     }
 
     pub fn is_running(&mut self) -> Result<bool> {
-        if self.running_state.load(Ordering::Relaxed) {
-            return Ok(true);
-        } else {
-            return Ok(false);
-        }
+        Ok(self.running_state.load(Ordering::Relaxed))
     }
 
     pub fn mem_size(&self) -> usize {
@@ -313,7 +565,7 @@ impl VirtualMachine {
 impl Drop for VirtualMachine {
     fn drop(&mut self) {
         debug!("Drop the Virtual Machine");
-        debug!("-------- Output --------");
-        debug!("{}", self.output());
+        //debug!("-------- Output --------");
+        //debug!("{}", self.output());
     }
 }

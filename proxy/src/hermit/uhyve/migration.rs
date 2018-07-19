@@ -1,6 +1,12 @@
 use std::str::FromStr;
+use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::io::Read;
 
+use hermit::utils;
 use hermit::error::*;
+use super::checkpoint::{CheckpointData, CheckpointConfig, vcpu_state};
+
+pub const MIGRATION_PORT: u16 = 1337;
 
 #[derive(Debug, Clone)]
 pub enum MigrationType {
@@ -17,5 +23,53 @@ impl FromStr for MigrationType {
             "live" | "LIVE" => Ok(MigrationType::Live),
             _ => Err(Error::UnsupportedMigrationType(s.into())),
         }
+    }
+}
+
+pub struct MigrationServer {
+    client: TcpStream,
+    data: CheckpointData
+}
+
+impl MigrationServer {
+    pub fn wait_for_incoming() -> Result<MigrationServer> {
+        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], MIGRATION_PORT))).unwrap();
+
+        match listener.incoming().next() {
+            Some(stream) => {
+                let mut mig_server = MigrationServer {
+                    client: stream.map_err(|_| Error::MigrationConnection)?,
+                    data: CheckpointData::default()
+                };
+
+                let mut cfg = CheckpointConfig::default();
+                mig_server.recv_data(unsafe { utils::any_as_u8_slice(&mut cfg) })?;
+                mig_server.data.config = cfg;
+
+                Ok(mig_server)
+            },
+            None => Err(Error::MigrationConnection)
+        }
+    }
+
+    pub fn recv_cpu_states(&mut self) -> Result<()> {
+        for _ in 0 .. self.data.config.get_num_cpus() {
+            let mut cpu_state = vcpu_state::default();
+            self.recv_data(unsafe { utils::any_as_u8_slice(&mut cpu_state) })?;
+            self.data.cpu_states.push(cpu_state);
+        }
+        Ok(())
+    }
+
+    pub fn recv_data(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.client.read_exact(buf).map_err(|_| Error::MigrationStream)
+    }
+
+    pub fn get_metadata(&self) -> &CheckpointConfig {
+        &self.data.config
+    }
+
+    pub fn get_cpu_states(&mut self) -> &mut Vec<vcpu_state> {
+        &mut self.data.cpu_states
     }
 }

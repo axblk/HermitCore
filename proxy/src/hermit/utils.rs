@@ -6,6 +6,13 @@ use nix::unistd::{mkstemp, close};
 
 use hermit::error::*;
 
+pub unsafe fn any_as_u8_slice<T: Sized>(p: &mut T) -> &mut [u8] {
+    ::std::slice::from_raw_parts_mut(
+        (p as *mut T) as *mut u8,
+        ::std::mem::size_of::<T>()
+    )
+}
+
 /// Returns the CPU frequency
 pub fn cpufreq() -> Result<u32> {
     let mut content = String::new();

@@ -14,10 +14,13 @@ use memmap::{MmapMut, MmapOptions};
 use errno::errno;
 
 use hermit::uhyve;
-use super::kvm_header::{kvm_sregs, kvm_regs, kvm_segment, kvm_cpuid2, KVM_MP_STATE_RUNNABLE, kvm_mp_state, kvm_cpuid_entry2};
+use hermit::uhyve::kvm_header::*;
 use super::{Result, Error, NameIOCTL};
 use super::gdt;
 use super::proto;
+use super::checkpoint::vcpu_state;
+use super::vm::KVMExtensions;
+use super::utils;
 
 pub const GUEST_OFFSET: usize = 0x0;
 pub const CPUID_FUNC_PERFMON: usize = 0x0A;
@@ -44,6 +47,40 @@ pub const X86_PDPT_P:  u64 = (1 << 0);
 pub const X86_PDPT_RW: u64 = (1 << 1);
 pub const X86_PDPT_PS: u64 = (1 << 7);
 
+/* x86-64 specific MSRs */
+pub const MSR_EFER:		            u32 = 0xc0000080; /* extended feature register */
+pub const MSR_STAR:		            u32 = 0xc0000081; /* legacy mode SYSCALL target */
+pub const MSR_LSTAR:	        	u32 = 0xc0000082; /* long mode SYSCALL target */
+pub const MSR_CSTAR:		        u32 = 0xc0000083; /* compat mode SYSCALL target */
+pub const MSR_SYSCALL_MASK:	        u32 = 0xc0000084; /* EFLAGS mask for syscall */
+pub const MSR_FS_BASE:		        u32 = 0xc0000100; /* 64bit FS base */
+pub const MSR_GS_BASE:		        u32 = 0xc0000101; /* 64bit GS base */
+pub const MSR_KERNEL_GS_BASE:	    u32 = 0xc0000102; /* SwapGS GS shadow */
+pub const MSR_TSC_AUX:	        	u32 = 0xc0000103; /* Auxiliary TSC */
+
+pub const MSR_IA32_CR_PAT:          u32 = 0x00000277;
+pub const MSR_PEBS_FRONTEND:        u32 = 0x000003f7;
+
+pub const MSR_IA32_POWER_CTL:       u32 = 0x000001fc;
+
+pub const MSR_IA32_MC0_CTL:         u32 = 0x00000400;
+pub const MSR_IA32_MC0_STATUS:      u32 = 0x00000401;
+pub const MSR_IA32_MC0_ADDR:        u32 = 0x00000402;
+pub const MSR_IA32_MC0_MISC:        u32 = 0x00000403;
+
+pub const MSR_IA32_SYSENTER_CS:     u32 = 0x00000174;
+pub const MSR_IA32_SYSENTER_ESP:    u32 = 0x00000175;
+pub const MSR_IA32_SYSENTER_EIP:    u32 = 0x00000176;
+
+pub const MSR_IA32_APICBASE:        u32 = 0x0000001b;
+pub const MSR_IA32_APICBASE_BSP:    u32 = 1<<8;
+pub const MSR_IA32_APICBASE_ENABLE: u32 = 1<<11;
+pub const MSR_IA32_APICBASE_BASE:   u32 = 0xfffff<<12;
+
+pub const MSR_IA32_MISC_ENABLE:     u32 = 0x000001a0;
+pub const MSR_IA32_TSC:             u32 = 0x00000010;
+
+
 /// EFER bits:
 pub const _EFER_SCE:    u64 = 0;  /* SYSCALL/SYSRET */
 pub const _EFER_LME:    u64 = 8;  /* Long mode enable */
@@ -61,6 +98,9 @@ pub const EFER_SVME:    u64 = (1<<_EFER_SVME);
 pub const EFER_LMSLE:   u64 = (1<<_EFER_LMSLE);
 pub const EFER_FFXSR:   u64 = (1<<_EFER_FFXSR);
 
+pub const IOAPIC_DEFAULT_BASE:  u32 = 0xfec00000;
+pub const APIC_DEFAULT_BASE:    u32 = 0xfee00000;
+
 pub enum ExitCode {
     Cause(Result<i32>),
     Innocent
@@ -68,7 +108,7 @@ pub enum ExitCode {
 
 pub struct SharedState {
     run_mem: MmapMut,
-    mboot:*mut u8,
+    mboot: *mut u8,
     guest_mem: *mut u8,
     running_state: Arc<AtomicBool>,
 }
@@ -78,7 +118,8 @@ pub struct VirtualCPU {
     kvm_fd: RawFd,
     vm_fd: RawFd,
     vcpu_fd: RawFd,
-    state: Arc<SharedState>
+    state: Arc<SharedState>,
+    extensions: KVMExtensions
 }
 
 #[repr(C)]
@@ -87,8 +128,15 @@ struct kvm_cpuid2_data {
     data: [kvm_cpuid_entry2; 100]
 }
 
+#[repr(C)]
+#[derive(Default)]
+pub struct kvm_msr_data {
+	info: kvm_msrs,
+	entries: [kvm_msr_entry; 25]
+}
+
 impl VirtualCPU {
-    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, entry: u64, mem: &mut MmapMut, mboot: *mut u8, running_state: Arc<AtomicBool>) -> Result<VirtualCPU> {
+    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, mem: &mut MmapMut, mboot: *mut u8, running_state: Arc<AtomicBool>, extensions: KVMExtensions) -> Result<VirtualCPU> {
         
         // create a new VCPU and save the file descriptor
         let fd = VirtualCPU::create_vcpu(vm_fd, id as i32)?;
@@ -98,11 +146,16 @@ impl VirtualCPU {
         let file = unsafe { File::from_raw_fd(fd) };
 
         let size = VirtualCPU::get_mmap_size(kvm_fd)?;
-        let run_mem = unsafe { MmapOptions::new().len(size).map_mut(&file) }
+        let mut run_mem = unsafe { MmapOptions::new().len(size).map_mut(&file) }
                 .map_err(|x| panic!("{:?}", x) )?;
       
         // forget the file, we don't want to close the file descriptor
         mem::forget(file);
+
+        unsafe {
+            let ref mut run = *(run_mem.as_mut_ptr() as *mut kvm_run);
+            run.apic_base = APIC_DEFAULT_BASE as u64;
+        }
 
         let state = SharedState {
             run_mem: run_mem,
@@ -116,25 +169,100 @@ impl VirtualCPU {
             vm_fd: vm_fd, 
             vcpu_fd: fd, 
             id: id, 
-            state: Arc::new(state)
+            state: Arc::new(state),
+            extensions: extensions
         };
+        
+        Ok(cpu)
+    }
 
+    pub fn get_id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn init(&self, entry: u64) -> Result<()> {
         debug!("Set the CPUID");
         
-        cpu.setup_cpuid()?;
-       
+        self.setup_cpuid()?;
+
         debug!("Set MP state");
 
-        cpu.set_mp_state(kvm_mp_state { mp_state: KVM_MP_STATE_RUNNABLE })?;
+        self.set_mp_state(kvm_mp_state { mp_state: KVM_MP_STATE_RUNNABLE })?;
 
-        debug!("Initialize the register of {} with start address {:?}", id, entry);
+        let mut msr_data = kvm_msr_data { info: kvm_msrs::default(), entries: [kvm_msr_entry::default(); 25] };
+        msr_data.entries[0].index = MSR_IA32_MISC_ENABLE;
+        msr_data.entries[0].data = 1;
+        msr_data.info.nmsrs = 1;
+        self.set_msrs(&mut msr_data)?;
+
+        debug!("Initialize the register of {} with start address {:?}", self.id, entry);
 
         let mut regs = kvm_regs::default();
         regs.rip = entry;
         regs.rflags = 0x2;
-        cpu.set_regs(regs)?;
-        
-        Ok(cpu)
+        self.set_regs(regs)?;
+
+        Ok(())
+    }
+
+    pub fn restore_cpu_state(&self, cpu_state: &mut vcpu_state) -> Result<()> {
+        cpu_state.mp_state.mp_state = KVM_MP_STATE_RUNNABLE;
+
+        //run.apic_base = APIC_DEFAULT_BASE as u64;
+        self.setup_cpuid()?;
+
+        self.set_sregs(cpu_state.sregs)?;
+        self.set_regs(cpu_state.regs)?;
+        self.set_msrs(&mut cpu_state.msr_data)?;
+        self.set_xcrs(cpu_state.xcrs)?;
+        self.set_mp_state(cpu_state.mp_state)?;
+        self.set_lapic(cpu_state.lapic)?;
+        self.set_fpu(cpu_state.fpu)?;
+        self.set_xsave(cpu_state.xsave)?;
+        self.set_vcpu_events(cpu_state.events)?;
+
+        Ok(())
+    }
+
+    pub fn save_cpu_state(&self) -> Result<vcpu_state> {
+        let mut cpu_state = vcpu_state::default();
+
+        /* define the list of required MSRs */
+        cpu_state.msr_data.entries[0].index = MSR_IA32_APICBASE;
+        cpu_state.msr_data.entries[1].index = MSR_IA32_SYSENTER_CS;
+        cpu_state.msr_data.entries[2].index = MSR_IA32_SYSENTER_ESP;
+        cpu_state.msr_data.entries[3].index = MSR_IA32_SYSENTER_EIP;
+        cpu_state.msr_data.entries[4].index = MSR_IA32_CR_PAT;
+        cpu_state.msr_data.entries[5].index = MSR_IA32_MISC_ENABLE;
+        cpu_state.msr_data.entries[6].index = MSR_IA32_TSC;
+        cpu_state.msr_data.entries[7].index = MSR_CSTAR;
+        cpu_state.msr_data.entries[8].index = MSR_STAR;
+        cpu_state.msr_data.entries[9].index = MSR_EFER;
+        cpu_state.msr_data.entries[10].index = MSR_LSTAR;
+        cpu_state.msr_data.entries[11].index = MSR_GS_BASE;
+        cpu_state.msr_data.entries[12].index = MSR_FS_BASE;
+        cpu_state.msr_data.entries[13].index = MSR_KERNEL_GS_BASE;
+
+        cpu_state.msr_data.info.nmsrs = 14;
+
+        // run.apic_base = APIC_DEFAULT_BASE as u64;
+
+        cpu_state.sregs = self.get_sregs()?;
+        cpu_state.regs = self.get_regs()?;
+        self.get_msrs(&mut cpu_state.msr_data)?;
+        cpu_state.xcrs = self.get_xcrs()?;
+        cpu_state.mp_state = self.get_mp_state()?;
+        cpu_state.lapic = self.get_lapic()?;
+        cpu_state.fpu = self.get_fpu()?;
+        cpu_state.xsave = self.get_xsave()?;
+        cpu_state.events = self.get_vcpu_events()?;
+
+        Ok(cpu_state)
+    }
+
+    fn print_registers(&self) -> Result<()> {
+        utils::show_registers(self.id, &self.get_regs()?, &self.get_sregs()?);
+        Ok(())
     }
 
     fn create_vcpu(fd: RawFd, id: i32) -> Result<RawFd> {
@@ -161,6 +289,16 @@ impl VirtualCPU {
         }
 
         Ok(())
+    }
+
+    fn get_regs(&self) -> Result<kvm_regs> {
+        let mut regs = kvm_regs::default();
+        unsafe {
+            uhyve::ioctl::get_regs(self.vcpu_fd, (&mut regs) as *mut kvm_regs)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetRegs))?;
+        }
+
+        Ok(regs)
     }
 
     fn set_regs(&self, mut regs: kvm_regs) -> Result<()> {
@@ -199,12 +337,135 @@ impl VirtualCPU {
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetVCPUMMAPSize)).map(|x| { x as usize})
         }
     }
+
+    fn get_mp_state(&self) -> Result<kvm_mp_state> {
+        let mut data = kvm_mp_state::default();
+        unsafe {
+            uhyve::ioctl::get_mp_state(self.vcpu_fd, (&mut data) as *mut kvm_mp_state)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetMPState))?;
+        }
+
+        Ok(data)
+    }
     
     fn set_mp_state(&self, mp_state: kvm_mp_state) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_mp_state(self.vcpu_fd, (&mp_state) as *const kvm_mp_state)
                 .map_err(|_| Error::IOCTL(NameIOCTL::SetMPState)).map(|_| ())
         }
+    }
+
+    fn get_msrs(&self, msr: &mut kvm_msr_data) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::get_msrs(self.kvm_fd, (&mut msr.info) as *mut kvm_msrs)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetMSRS))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn set_msrs(&self, msr: &mut kvm_msr_data) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_msrs(self.vcpu_fd, (&mut msr.info) as *mut kvm_msrs)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetMSRS))?;
+        }
+
+        Ok(())
+    }
+
+    fn get_fpu(&self) -> Result<kvm_fpu> {
+        let mut data = kvm_fpu::default();
+        unsafe {
+            uhyve::ioctl::get_fpu(self.vcpu_fd, (&mut data) as *mut kvm_fpu)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetFPU))?;
+        }
+
+        Ok(data)
+    }
+
+    fn set_fpu(&self, mut data: kvm_fpu) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_fpu(self.vcpu_fd, (&mut data) as *mut kvm_fpu)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetFPU))?;
+        }
+
+        Ok(())
+    }
+
+    fn get_lapic(&self) -> Result<kvm_lapic_state> {
+        let mut data = kvm_lapic_state::default();
+        unsafe {
+            uhyve::ioctl::get_lapic(self.vcpu_fd, (&mut data) as *mut kvm_lapic_state)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetLapic))?;
+        }
+
+        Ok(data)
+    }
+
+    fn set_lapic(&self, mut data: kvm_lapic_state) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_lapic(self.vcpu_fd, (&mut data) as *mut kvm_lapic_state)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetLapic))?;
+        }
+
+        Ok(())
+    }
+
+    fn get_vcpu_events(&self) -> Result<kvm_vcpu_events> {
+        let mut data = kvm_vcpu_events::default();
+        unsafe {
+            uhyve::ioctl::get_vcpu_events(self.vcpu_fd, (&mut data) as *mut kvm_vcpu_events)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetVCPUEvents))?;
+        }
+
+        Ok(data)
+    }
+
+    fn set_vcpu_events(&self, mut data: kvm_vcpu_events) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_vcpu_events(self.vcpu_fd, (&mut data) as *mut kvm_vcpu_events)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetVCPUEvents))?;
+        }
+
+        Ok(())
+    }
+
+    fn get_xsave(&self) -> Result<kvm_xsave> {
+        let mut data = kvm_xsave::default();
+        unsafe {
+            uhyve::ioctl::get_xsave(self.vcpu_fd, (&mut data) as *mut kvm_xsave)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetXSave))?;
+        }
+
+        Ok(data)
+    }
+
+    fn set_xsave(&self, mut data: kvm_xsave) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_xsave(self.vcpu_fd, (&mut data) as *mut kvm_xsave)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetXSave))?;
+        }
+
+        Ok(())
+    }
+
+    fn get_xcrs(&self) -> Result<kvm_xcrs> {
+        let mut data = kvm_xcrs::default();
+        unsafe {
+            uhyve::ioctl::get_xcrs(self.vcpu_fd, (&mut data) as *mut kvm_xcrs)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetXCRS))?;
+        }
+
+        Ok(data)
+    }
+
+    fn set_xcrs(&self, mut data: kvm_xcrs) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_xcrs(self.vcpu_fd, (&mut data) as *mut kvm_xcrs)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetXCRS))?;
+        }
+
+        Ok(())
     }
 
     pub fn single_run(fd: RawFd, state: &Arc<SharedState>) -> Result<proto::Return> {
@@ -288,8 +549,8 @@ impl VirtualCPU {
 
         debug!("Setup GDT");
         self.setup_system_gdt(&mut sregs, 0)?;
-        debug!("Setup the page table");
-        self.setup_system_page_table(&mut sregs)?;
+        debug!("Setup the page tables");
+        self.setup_system_page_tables(&mut sregs)?;
         debug!("Set the system to 64bit");
         self.setup_system_64bit(&mut sregs)?;
 
@@ -298,7 +559,7 @@ impl VirtualCPU {
 
     pub fn setup_system_gdt(&self, sregs: &mut kvm_sregs, offset: u64) -> Result<()> {
         let (mut data_seg, mut code_seg) = (kvm_segment::default(), kvm_segment::default());               
-        
+
         // create the GDT entries
         let gdt_null = gdt::Entry::new(0, 0, 0);
         let gdt_code = gdt::Entry::new(0xA09B, 0, 0xFFFFF);
@@ -327,7 +588,8 @@ impl VirtualCPU {
 
         Ok(())
     }
-    pub fn setup_system_page_table(&self, sregs: &mut kvm_sregs) -> Result<()> {
+
+    pub fn setup_system_page_tables(&self, sregs: &mut kvm_sregs) -> Result<()> {
         unsafe {
             let pml4 = self.state.guest_mem.offset(BOOT_PML4 as isize) as *mut u64;
             let pdpte = self.state.guest_mem.offset(BOOT_PDPTE as isize) as *mut u64;
@@ -367,7 +629,9 @@ impl VirtualCPU {
             match entry.function {
                 1 => {
                     entry.ecx |= 1u32 << 31; // propagate that we are running on a hypervisor
-                    //entry.ecx = entry.ecx & !(1 << 21);
+                    if self.extensions.cap_tsc_deadline {
+                        entry.eax |= 1u32 << 24; // enable TSC deadline feature
+                    }
                     entry.edx |= 1u32 << 5; // enable msr support
                 },
                 0x0A => {

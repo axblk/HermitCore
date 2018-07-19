@@ -1,5 +1,5 @@
 use libc::{write, read, lseek, open, close, strcpy, c_void, c_char};
-use super::kvm_header::{kvm_run, KVM_EXIT_IO, KVM_EXIT_HLT, KVM_EXIT_MMIO,KVM_EXIT_FAIL_ENTRY, KVM_EXIT_INTERNAL_ERROR, KVM_EXIT_SHUTDOWN }; 
+use super::kvm_header::*;
 use std::ffi::CString;
 use std::env;
 
@@ -230,6 +230,7 @@ impl Syscall {
                     KVM_EXIT_FAIL_ENTRY => panic!("KVM: entry failure: hw_entry_failure_reason={:#x}", (*id).__bindgen_anon_1.fail_entry.hardware_entry_failure_reason),
                     KVM_EXIT_INTERNAL_ERROR => panic!("KVM: internal error exit: suberror = {:#x}", (*id).__bindgen_anon_1.internal.suberror),
                     KVM_EXIT_SHUTDOWN => format!("KVM: receive shutdown command"),
+                    // KVM_EXIT_DEBUG => 
                     _ => {
                         panic!("KVM: unhandled exit: exit_reason = {:#x}", (*id).exit_reason)
                     }

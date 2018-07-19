@@ -1,5 +1,7 @@
 //gdt.rs	kvm_header.rs  kvm.rs  mod.rs  vcpu.rs	vm.rs
+mod checkpoint;
 mod gdt;
+mod utils;
 pub mod kvm_header;
 pub mod uhyve;
 pub mod vcpu;

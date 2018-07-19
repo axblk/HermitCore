@@ -20,7 +20,15 @@ pub enum Error {
     ProxyConnect,
     ProxyPacket,
     InotifyError,
-    UnsupportedMigrationType(String)
+    UnsupportedMigrationType(String),
+    KVMConnection,
+    InvalidCheckpoint,
+    KVMApiVersion(i32),
+    CAPIRQFD,
+    MigrationConnection,
+    MigrationStream,
+    NoCheckpointFile,
+    VCPUStatesNotInitialized
 }
 
 impl fmt::Display for Error {
@@ -41,7 +49,15 @@ impl fmt::Display for Error {
             Error::ProxyConnect => write!(f, "Proxy: connection error"),
             Error::ProxyPacket => write!(f, "Could not read proxy packet"),
             Error::InotifyError => write!(f, "Inotify error"),
-            Error::UnsupportedMigrationType(ref name) => write!(f, "Migration type '{}' not supported.", name)
+            Error::UnsupportedMigrationType(ref name) => write!(f, "Migration type '{}' not supported.", name),
+            Error::KVMConnection => write!(f, "Could not open: /dev/kvm"),
+            Error::InvalidCheckpoint =>  write!(f, "Invalid checkpoint data"),
+            Error::KVMApiVersion(version) =>  write!(f, "KVM: API version is {}, uhyve requires version 12", version),
+            Error::CAPIRQFD =>  write!(f, "The support of KVM_CAP_IRQFD is curently required"),
+            Error::MigrationConnection =>  write!(f, "Migration connection error"),
+            Error::MigrationStream =>  write!(f, "Migration stream error"),
+            Error::NoCheckpointFile =>  write!(f, "Could notfind a checkpoint file"),
+            Error::VCPUStatesNotInitialized =>  write!(f, "vcpu states not initialized")
         }
     }
 }
@@ -69,5 +85,22 @@ pub enum NameIOCTL {
     SetSRegs,
     SetTssIdentity,
     SetTssAddr,
-    SetMPState
+    GetMPState,
+    SetMPState,
+    EnableCap,
+    GetIRQChip,
+    SetIRQChip,
+    SetClock,
+    GetMSRS,
+    SetMSRS,
+    GetFPU,
+    SetFPU,
+    GetLapic,
+    SetLapic,
+    GetVCPUEvents,
+    SetVCPUEvents,
+    GetXSave,
+    SetXSave,
+    GetXCRS,
+    SetXCRS
 }
