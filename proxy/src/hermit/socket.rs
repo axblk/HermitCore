@@ -41,7 +41,7 @@ impl Socket {
 
     pub fn connect(&mut self) -> Result<()> {
         // prepare the initializing struct
-        let length: usize = 4 + 4 + env::args().skip(2).map(|x| 4+x.len()+1).sum::<usize>() +
+        let length: usize = 4 + 4 + env::args().skip(1).map(|x| 4+x.len()+1).sum::<usize>() +
                             4 + env::vars().map(|(x,y)| 5 + x.len()+ y.len()).sum::<usize>();
 
         let mut buf = Cursor::new(vec![0u8;length]);
@@ -49,8 +49,8 @@ impl Socket {
         // initialize the connection with the magic number
         buf.write_u32::<LittleEndian>(HERMIT_MAGIC);
         // send all arguments (skip first)
-        buf.write_u32::<LittleEndian>(env::args().count() as u32 - 2);
-        for key in env::args().skip(2) {
+        buf.write_u32::<LittleEndian>(env::args().count() as u32 - 1);
+        for key in env::args().skip(1) {
             buf.write_u32::<LittleEndian>(key.len() as u32 + 1);
             buf.write(key.as_bytes());
             buf.write_u8(b'\0');
