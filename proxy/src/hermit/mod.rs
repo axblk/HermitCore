@@ -8,20 +8,13 @@ pub mod uhyve;
 
 use std::fs::File;
 use std::path::Path;
-use std::io::{Write, Read, BufReader, BufRead};
+use std::io::{BufReader, BufRead};
 use inotify::{Inotify, watch_mask};
 use std::env;
-use std::os::unix::net::UnixStream;
-use std::sync::Arc;
-use std::sync::Mutex;
-
-use hermit::qemu::QEmu;
-use hermit::multi::Multi;
-use hermit::uhyve::uhyve::Uhyve;
 
 use hermit::error::*;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct IsleParameterQEmu {
     binary: String,
     use_kvm: bool,
@@ -32,7 +25,7 @@ pub struct IsleParameterQEmu {
     app_port: u16
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum IsleParameter {
     QEmu {
         mem_size: u64,
@@ -112,10 +105,10 @@ pub trait Isle {
         };
 
         // open the log file
-        let mut file = File::open(log)
+        let file = File::open(log)
             .map_err(|x| Error::InvalidFile(format!("{:?}",x)))?;
 
-        let mut reader = BufReader::new(file);
+        let reader = BufReader::new(file);
        
         for line in reader.lines() {
             if line.unwrap().contains("TCP server is listening.") {

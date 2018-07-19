@@ -8,17 +8,12 @@
 #[macro_use]
 extern crate clap;
 
-#[macro_use]
-extern crate serde_derive;
-extern crate bincode;
-
 extern crate libc;
 extern crate memmap;
 extern crate elf;
 extern crate errno;
 extern crate inotify;
 extern crate byteorder;
-extern crate chrono;
 
 #[macro_use]
 extern crate nix;

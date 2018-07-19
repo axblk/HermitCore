@@ -1,14 +1,8 @@
 use std::net::TcpStream;
-use std::{env, slice};
+use std::env;
 use std::mem::transmute;
 use std::io::{Write, Read, Cursor};
-use std::ffi::CString;
-use std::ffi::CStr;
-use std::process;
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::os::unix::net::UnixStream;
+use byteorder::{WriteBytesExt, LittleEndian};
 
 use hermit::proto;
 use hermit::proto::Packet;
@@ -54,7 +48,7 @@ impl Socket {
             buf.write(tmp.as_bytes());
         }
 
-        let mut stream;
+        let stream;
         loop {
             match TcpStream::connect(("127.0.0.1", self.port)) {
                 Ok(mut s) => { 
@@ -108,7 +102,7 @@ impl Socket {
                 if let proto::State::Finished(packet) = state {
                     unsafe {
                     match packet {
-                        Packet::Exit { arg } => break 'main,
+                        Packet::Exit { arg: _ } => break 'main,
                         Packet::Write { fd, buf } => {
                             let mut buf_ret: [u8; 8] = transmute(libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()).to_le());
                             if fd > 2 {
@@ -117,7 +111,7 @@ impl Socket {
                         },
                         Packet::Open { name, mode, flags } => {
                             let mut buf: [u8; 4] = transmute(libc::open(name.as_ptr(), flags as i32, mode as i32).to_le());
-                            let written = stream.write(&buf).unwrap();
+                            stream.write(&buf).unwrap();
                         },
                         Packet::Close { fd } => {
                             let res = match fd {

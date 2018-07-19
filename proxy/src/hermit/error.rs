@@ -3,7 +3,7 @@ use errno::errno;
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Clone)]
 pub enum Error {
     InternalError,
     NotEnoughMemory,
@@ -44,7 +44,7 @@ impl fmt::Debug for Error {
     }
 }
 
-#[derive(Serialize, Deserialize,Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum NameIOCTL {
     GetVersion,
     CreateVM,

@@ -14,7 +14,3 @@ byteorder = "1"
 log = "0.4"
 env_logger = "0.5.10"
 clap = "2.24.2"
-serde = "1.*.*"
-chrono = { version = "0.4", features = ["serde"] }
-bincode = "1.0"
-serde_derive = "1.*.*"

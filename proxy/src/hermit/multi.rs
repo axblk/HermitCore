@@ -1,15 +1,9 @@
 use std::fs::File;
-use std::env;
 use std::io::{Write, Read};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
 
 use hermit::Isle;
 use hermit::error::*;
 use hermit::socket::Socket;
-
-use std::os::unix::net::UnixStream;
 
 pub struct Multi {
     num: u8,
@@ -76,7 +70,7 @@ impl Isle for Multi {
         let mut socket = self.socket.take().ok_or(Error::InternalError)?;
         socket.connect()?;
 
-        socket.run();
+        socket.run()?;
 
         Ok(())
     }

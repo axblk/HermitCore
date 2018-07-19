@@ -1,15 +1,8 @@
-use std::env;
 use std::process::{Stdio, Child, Command};
 use libc;
 use std::fs::File;
 use std::io::Read;
 use std::process::{ChildStdout, ChildStderr};
-use std::thread;
-use std::os::unix::net::UnixStream;
-use std::io::Write;
-use std::time::Duration;
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use hermit::{Isle, IsleParameterQEmu};
 use hermit::utils;
@@ -33,7 +26,7 @@ fn get_free_port() -> Result<u16> {
         // find first bit set to zero
         let pos = (!FREE_PORT).trailing_zeros();
 
-        FREE_PORT |= (1 << pos);   
+        FREE_PORT |= 1 << pos;   
     
         Ok(BASE_PORT + pos as u16)
     }
