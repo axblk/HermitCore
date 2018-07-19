@@ -6,7 +6,7 @@ authors = ["bytesnake <bytesnake@mailbox.org>"]
 [dependencies]
 libc = "0.2.42"
 nix = "0.11"
-memmap = "0.5"
+memmap = "0.6"
 elf = "0.0.10"
 errno = "0.2.4"
 inotify = "0.5"

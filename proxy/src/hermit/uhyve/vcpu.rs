@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use memmap::{Mmap, Protection};
+use memmap::{MmapMut, MmapOptions};
 use errno::errno;
 
 use hermit::uhyve;
@@ -67,7 +67,7 @@ pub enum ExitCode {
 }
 
 pub struct SharedState {
-    run_mem: Mmap,
+    run_mem: MmapMut,
     mboot:*mut u8,
     guest_mem: *mut u8,
     running_state: Arc<AtomicBool>,
@@ -88,7 +88,7 @@ struct kvm_cpuid2_data {
 }
 
 impl VirtualCPU {
-    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, entry: u64, mem: &mut Mmap, mboot: *mut u8, running_state: Arc<AtomicBool>) -> Result<VirtualCPU> {
+    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, entry: u64, mem: &mut MmapMut, mboot: *mut u8, running_state: Arc<AtomicBool>) -> Result<VirtualCPU> {
         
         // create a new VCPU and save the file descriptor
         let fd = VirtualCPU::create_vcpu(vm_fd, id as i32)?;
@@ -97,7 +97,8 @@ impl VirtualCPU {
 
         let file = unsafe { File::from_raw_fd(fd) };
 
-        let run_mem = Mmap::open_with_offset(&file, Protection::ReadWrite, 0, VirtualCPU::get_mmap_size(kvm_fd)?)
+        let size = VirtualCPU::get_mmap_size(kvm_fd)?;
+        let run_mem = unsafe { MmapOptions::new().len(size).map_mut(&file) }
                 .map_err(|x| panic!("{:?}", x) )?;
       
         // forget the file, we don't want to close the file descriptor
@@ -106,7 +107,7 @@ impl VirtualCPU {
         let state = SharedState {
             run_mem: run_mem,
             mboot: mboot,
-            guest_mem: mem.mut_ptr(),
+            guest_mem: mem.as_mut_ptr(),
             running_state: running_state,
         };
 
@@ -228,7 +229,7 @@ impl VirtualCPU {
         }
 
         unsafe {
-            let a = proto::Syscall::from_mem(state.run_mem.ptr(), state.guest_mem).run(state.guest_mem);
+            let a = proto::Syscall::from_mem(state.run_mem.as_ptr(), state.guest_mem).run(state.guest_mem);
         
             a
         }

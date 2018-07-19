@@ -3,7 +3,7 @@
 
 use libc;
 use std::io::Cursor;
-use memmap::{Mmap, Protection};
+use memmap::{Mmap, MmapMut};
 use elf;
 use elf::types::{ELFCLASS64, OSABI, PT_LOAD};
 use std::ffi::CStr;
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::ptr;
+use std::fs::File;
 
 use hermit::is_verbose;
 use hermit::IsleParameterUhyve;
@@ -32,7 +33,7 @@ pub const KVM_32BIT_GAP_START:      usize = KVM_32BIT_MAX_MEM_SIZE - KVM_32BIT_G
 pub struct VirtualMachine {
     kvm_fd: libc::c_int,
     vm_fd: libc::c_int,
-    mem: Mmap,
+    mem: MmapMut,
     elf_header: Option<elf::types::FileHeader>,
     klog: Option<*const i8>,
     mboot: Option<*mut u8>,
@@ -50,13 +51,13 @@ impl VirtualMachine {
         // create a new memory region to map the memory of our guest
         let mut mem;
         if size < KVM_32BIT_GAP_START {
-            mem = Mmap::anonymous(size, Protection::ReadWrite)
+            mem = MmapMut::map_anon(size)
                 .map_err(|_| Error::NotEnoughMemory)?;
         } else {
-            mem = Mmap::anonymous(size + KVM_32BIT_GAP_START, Protection::ReadWrite)
+            mem = MmapMut::map_anon(size + KVM_32BIT_GAP_START)
                 .map_err(|_| Error::NotEnoughMemory)?;
             
-            unsafe { libc::mprotect((mem.mut_ptr() as *mut libc::c_void).offset(KVM_32BIT_GAP_START as isize), KVM_32BIT_GAP_START, libc::PROT_NONE); }
+            unsafe { libc::mprotect((mem.as_mut_ptr() as *mut libc::c_void).offset(KVM_32BIT_GAP_START as isize), KVM_32BIT_GAP_START, libc::PROT_NONE); }
         }
         
         Ok(VirtualMachine { kvm_fd: kvm_fd, vm_fd: fd, mem: mem, elf_header: None, klog: None, vcpus: Vec::new(), mboot: None, num_cpus: num_cpus, sregs: kvm_sregs::default(), running_state: Arc::new(AtomicBool::new(false)), thread_handles: Vec::new() })
@@ -67,12 +68,12 @@ impl VirtualMachine {
         debug!("Load kernel from {}", path);
 
         // open the file in read only
-        let file = Mmap::open_path(path, Protection::Read)
-            .map_err(|_| Error::InvalidFile(path.into()))?;
+        let kernel_file = File::open(path).map_err(|_| Error::InvalidFile(path.into()))?;
+        let file = unsafe { Mmap::map(&kernel_file) }.map_err(|_| Error::InvalidFile(path.into()))? ;
 
         // parse the header with ELF module
         let file_efi = {
-            let mut data = unsafe { Cursor::new(file.as_slice()) };
+            let mut data = Cursor::new(file.as_ref());
             
             elf::File::open_stream(&mut data)
                 .map_err(|_| Error::InvalidFile(path.into()))
@@ -86,8 +87,8 @@ impl VirtualMachine {
 
         // acquire the slices of the user memory and kernel file
         let vm_mem_length = self.mem.len() as u64;
-        let vm_mem = unsafe { self.mem.as_mut_slice() };
-        let kernel_file  = unsafe { file.as_slice() };
+        let vm_mem = self.mem.as_mut();
+        let kernel_file  = file.as_ref();
 
         for header in file_efi.phdrs {
             if header.progtype != PT_LOAD {
@@ -169,7 +170,7 @@ impl VirtualMachine {
         
         self.set_tss_addr(identity_base+0x1000)?;
 
-        let start_ptr = unsafe { self.mem.as_slice().as_ptr() as u64 };
+        let start_ptr = self.mem.as_ptr() as u64;
         let mut kvm_region = kvm_userspace_memory_region {
             slot: 0, guest_phys_addr: 0, flags: 0, memory_size: self.mem_size() as u64, userspace_addr: start_ptr
         };
@@ -233,7 +234,7 @@ impl VirtualMachine {
     pub fn create_vcpu(&mut self, id: u32) -> Result<()> {
         let entry = self.elf_header.ok_or(Error::KernelNotLoaded)?.entry;
 
-        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, entry, &mut self.mem,self.mboot.unwrap(), self.running_state.clone())?;
+        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, entry, &mut self.mem, self.mboot.unwrap(), self.running_state.clone())?;
 
         if id == 0 {
             self.sregs = cpu.init_sregs()?;
