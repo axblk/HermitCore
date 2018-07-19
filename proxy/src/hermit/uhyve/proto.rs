@@ -1,7 +1,6 @@
 use libc::{write, read, lseek, exit, open, close, c_int, c_void, c_char};
 use super::kvm_header::{kvm_run, KVM_EXIT_IO, KVM_EXIT_HLT, KVM_EXIT_MMIO,KVM_EXIT_FAIL_ENTRY, KVM_EXIT_INTERNAL_ERROR, KVM_EXIT_SHUTDOWN }; 
 use std::ffi::CStr;
-use bincode::{serialize, Infinite};
 use std::slice;
 
 use super::{Error, Result};
@@ -13,12 +12,6 @@ const PORT_CLOSE: u16 = 0x501;
 const PORT_READ: u16 = 0x502;
 const PORT_EXIT: u16 = 0x503;
 const PORT_LSEEK: u16 = 0x504;
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ActionResult {
-    Output(String),
-    OutputErr(String)
-}
 
 #[repr(packed)]
 pub struct Write {
@@ -103,24 +96,7 @@ impl Syscall {
     pub unsafe fn run(&self, guest_mem: *mut u8, console: Console) -> Result<Return> {
         match *self {
             Syscall::Write(obj) => {
-                use std::io::Write;
-
-                if (*obj).fd != 1 && (*obj).fd != 2 {
-                    (*obj).length = write((*obj).fd, guest_mem.offset((*obj).buf) as *const c_void, (*obj).length as usize);
-                } else {
-                    let tmp = slice::from_raw_parts(guest_mem.offset((*obj).buf) as *const u8, (*obj).length as usize);
-                    let content = String::from_utf8_unchecked(tmp.into());
-
-                    let ret = match (*obj).fd {
-                        1 => ActionResult::Output(content),
-                        2 => ActionResult::OutputErr(content),
-                        _ => unreachable!()
-                    };
-
-                    let buf: Vec<u8> = serialize(&ret, Infinite).unwrap();
-                    
-                    console.lock().unwrap().retain(|mut x| x.write(&buf).is_ok());
-                }
+                (*obj).length = write((*obj).fd, guest_mem.offset((*obj).buf) as *const c_void, (*obj).length as usize);
             },
             Syscall::Read(obj) => {
                 (*obj).ret = read((*obj).fd, guest_mem.offset((*obj).buf) as *mut c_void, (*obj).len);

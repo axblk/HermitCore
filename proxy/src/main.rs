@@ -29,12 +29,7 @@ extern crate env_logger;
 
 mod hermit;
 
-use nix::sys::signal;
 use std::{env, fs};
-use std::os::unix::net::UnixStream;
-
-use std::net::Shutdown;
-use chrono::DateTime;
 
 use hermit::Isle;
 use hermit::IsleParameter;
