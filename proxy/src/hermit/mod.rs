@@ -63,7 +63,7 @@ impl IsleParameter {
     pub fn from_env() -> IsleParameter {
         let isle_kind = env::var("HERMIT_ISLE").unwrap_or("qemu".into());
         let mem_size: u64 = env::var("HERMIT_MEM").map(|x| utils::parse_mem(&x).unwrap_or(512*1024*1024)).unwrap_or(512*1024*1024);
-        let num_cpus: u32 = env::var("HERMIT_CPUS").map(|x| x.parse().unwrap_or(1)).unwrap_or(1);
+        let num_cpus: u32 = env::var("HERMIT_CPUS").map(|x| x.parse().unwrap_or(1)).map(|x| if x == 0 { 1 } else { x }).unwrap_or(1);
 
         match isle_kind.as_str() {
             "multi" | "MULTI" | "Multi" => {
