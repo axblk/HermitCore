@@ -244,11 +244,15 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub fn output(&self) -> Result<String> {
-        let paddr = self.klog.ok_or(Error::KernelNotLoaded)?;
-        let c_str = unsafe { CStr::from_ptr(paddr).to_str().map_err(|_| Error::KernelNotLoaded)? };
-        
-        Ok(c_str.into())
+    pub fn output(&self) -> String {
+        match self.klog {
+            Some(paddr) => {
+                let c_str = unsafe { CStr::from_ptr(paddr) };
+                c_str.to_str().unwrap_or("").into()
+            },
+            None => "".into()
+        }
+
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -304,9 +308,7 @@ impl VirtualMachine {
 impl Drop for VirtualMachine {
     fn drop(&mut self) {
         debug!("Drop the Virtual Machine");
-        if let Ok(output) = self.output() {
-            debug!("-------- Output --------");
-            debug!("{}", output);
-        }
+        debug!("-------- Output --------");
+        debug!("{}", self.output());
     }
 }

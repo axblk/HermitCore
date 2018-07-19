@@ -1,6 +1,5 @@
 use std::process::{Stdio, Child, Command};
-use std::fs::File;
-use std::io::{Read, BufReader, BufRead};
+use std::path::Path;
 use std::process::{ChildStdout, ChildStderr};
 use std::env;
 use nix::sys::signal::{kill, SIGINT};
@@ -9,43 +8,42 @@ use hermit::{Isle, IsleParameterQEmu};
 use hermit::utils;
 use hermit::error::*;
 use hermit::socket::Socket;
-use hermit::is_verbose;
+use hermit;
 
 const PIDNAME: &'static str = "/tmp/hpid-XXXXXX";
 const TMPNAME: &'static str = "/tmp/hermit-XXXXXX";
 
-const BASE_PORT: u16 = 18766;
-
 #[derive(Debug)]
 pub struct QEmu {
-    socket: Option<Socket>,
+    socket: Socket,
     child: Child,
     stdout: ChildStdout,
     stderr: ChildStderr,
-    tmp_file: String,
-    pid_file: String,
+    tmp_file: utils::TmpFile,
+    pid_file: utils::TmpFile,
 }
 
 impl QEmu {
     pub fn new(path: &str, mem_size: u64, num_cpus: u32, additional: IsleParameterQEmu) -> Result<QEmu> {
-        let tmpf = utils::create_tmp_file(TMPNAME)?;
-        let pidf = utils::create_tmp_file(PIDNAME)?;
+        let tmpf = utils::TmpFile::create(TMPNAME)?;
+        let pidf = utils::TmpFile::create(PIDNAME)?;
         
         let port = if additional.port == 0 || additional.port >= u16::max_value() {
-            BASE_PORT
+            hermit::BASE_PORT
         } else {
             additional.port
         };
 
         debug!("port number: {}", port);
 
-        let mut child = QEmu::start_with(path, port, mem_size, num_cpus, additional, &tmpf, &pidf)?.spawn().expect("Couldn't find qemu binary!");
+        let mut child = QEmu::start_with(path, port, mem_size, num_cpus, additional, tmpf.get_path(), pidf.get_path()).spawn()
+            .map_err(|_| Error::MissingQEmuBinary)?;
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let socket = Socket::new(port);
 
         Ok(QEmu {
-            socket: Some(socket),
+            socket: socket,
             child: child,
             stdout: stdout,
             stderr: stderr,
@@ -54,10 +52,10 @@ impl QEmu {
         })
     }
     
-    pub fn start_with(path: &str, port: u16, mem_size: u64, num_cpus: u32, add: IsleParameterQEmu, tmp_file: &str, pid_file: &str) -> Result<Command> {
-        let mut hostfwd = format!("user,hostfwd=tcp:127.0.0.1:{}-:{}", port, BASE_PORT);
+    pub fn start_with(path: &str, port: u16, mem_size: u64, num_cpus: u32, add: IsleParameterQEmu, tmp_file: &Path, pid_file: &Path) -> Command {
+        let mut hostfwd = format!("user,hostfwd=tcp:127.0.0.1:{}-:{}", port, hermit::BASE_PORT);
         let monitor_str = format!("telnet:127.0.0.1:{},server,nowait", port+1);
-        let chardev = format!("file,id=gnc0,path={}", &tmp_file);
+        let chardev = format!("file,id=gnc0,path={}", &tmp_file.display());
         let freq = format!("\"-freq{} -proxy\"",(utils::cpufreq().unwrap()/1000).to_string());
         let num_cpus = num_cpus.to_string();
         let mem_size = format!("{}B", mem_size);
@@ -76,7 +74,7 @@ impl QEmu {
             "-display", "none",
             "-smp", &num_cpus,
             "-m", &mem_size,
-            "-pidfile", pid_file,
+            "-pidfile", pid_file.to_str().unwrap(),
             "-net", "nic,model=rtl8139",
             "-net", &hostfwd,
             "-chardev", &chardev,
@@ -113,10 +111,10 @@ impl QEmu {
 
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        Ok(cmd)
+        cmd
     }
 
-    pub fn qemu_log(&mut self) -> (String, String) {
+    /*pub fn qemu_log(&mut self) -> (String, String) {
         let mut stderr = String::new();
         let mut stdout = String::new();
 
@@ -124,67 +122,58 @@ impl QEmu {
         self.stderr.read_to_string(&mut stderr);
 
         (stdout, stderr)
-    }
+    }*/
 }
 
 impl Isle for QEmu {
     fn num(&self) -> u8 { 0 }
-    fn log_file(&self) -> Option<String> {
-        Some(self.tmp_file.clone())
-    }
-    fn log_path(&self) -> Option<String> {
-        Some("/tmp".into())
-    }
-    fn cpu_path(&self) -> Option<String> {
-        None 
+    fn log_file(&self) -> Option<&Path> {
+        Some(self.tmp_file.get_path())
     }
 
     fn run(&mut self) -> Result<()> {
-        let mut socket = self.socket.take().ok_or(Error::InternalError)?;
-        socket.connect()?;
-
-        socket.run()?;
+        self.socket.connect()?;
+        self.socket.run()?;
 
         Ok(())
     }
 
-    fn output(&self) -> Result<String> {
-        let mut file = File::open(&self.tmp_file).unwrap();
+    fn stop(&mut self) -> Result<i32> {
+        let mut id_str = String::new();
+        self.pid_file.read_to_string(&mut id_str).ok();
+        id_str.pop();
+
+        if let Ok(id) = id_str.parse::<i32>() {
+            if id >= 0 {
+                let _ = kill(id, SIGINT);
+            }
+        }
+
+        Ok(0)
+    }
+
+    fn output(&self) -> String {
         let mut content = String::new();
-
-        file.read_to_string(&mut content);
-
-        Ok(content)
+        match self.tmp_file.read_to_string(&mut content) {
+            Ok(_) => content,
+            Err(_) => {
+                debug!("Could not read kernel log");
+                "".into()
+            }
+        }
     }
 }
 
 impl Drop for QEmu {
     fn drop(&mut self) {
-        let mut id_str = String::new();
-        let mut file = File::open(&self.pid_file).unwrap();
-        file.read_to_string(&mut id_str);
-        id_str.pop();
+        let _ = self.stop();
 
-        let id = id_str.parse::<i32>().unwrap();
-
-        if id >= 0 {
-            kill(id, SIGINT);
+        if hermit::is_verbose() {
+            println!("Dump kernel log:");
+            println!("================");
+            for line in self.output().lines() {
+                println!("{}", line);
+            }
         }
-
-        if is_verbose() {
-            match File::open(&self.tmp_file) {
-                Ok(file) => {
-                    println!("Dump kernel log:");
-                    println!("================");
-                    for line in BufReader::new(file).lines() {
-                        println!("{}", line.unwrap());
-                    }
-                },
-                Err(_) => debug!("Could not read kernel log")
-            };
-        }
-
-        utils::delete_tmp_file(&self.pid_file);
-        utils::delete_tmp_file(&self.tmp_file);
     }
 }

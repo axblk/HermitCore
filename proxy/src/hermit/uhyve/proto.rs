@@ -160,7 +160,7 @@ impl Syscall {
                 if is_verbose() {
                     use std::io::{self, Write};
                     let buf = [obj];
-                    io::stderr().write(&buf);
+                    io::stderr().write(&buf).ok();
                 }
             },
             Syscall::Write(obj) => {

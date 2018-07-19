@@ -1,7 +1,8 @@
-use std::fs::File;
+use std::fs::{File, remove_file};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
-use nix::unistd::{mkstemp, unlink};
+use nix::unistd::{mkstemp, close};
 
 use hermit::error::*;
 
@@ -11,7 +12,7 @@ pub fn cpufreq() -> Result<u32> {
    
     // If the file cpuinfo_max_freq exists, parse the content and return the frequency
     if let Ok(mut file) = File::open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq") {
-        file.read_to_string(&mut content).unwrap();
+        file.read_to_string(&mut content).map_err(|_| Error::MissingFrequency)?;
         return content.trim().parse::<u32>().map_err(|_| Error::MissingFrequency);
     } 
     // otherwise use the more acurate cpuinfo file and search for the right line
@@ -20,7 +21,8 @@ pub fn cpufreq() -> Result<u32> {
     
         for line in content.lines() {
             if line.starts_with("cpu MHz") {
-                return line.split(':').skip(1).next().unwrap().trim().parse::<f32>().map_err(|_| Error::MissingFrequency).map(|x| x as u32);
+                return line.split(':').skip(1).next().ok_or(Error::MissingFrequency)?
+                    .trim().parse::<f32>().map_err(|_| Error::MissingFrequency).map(|x| x as u32);
             }
         }
     }
@@ -46,25 +48,46 @@ pub fn parse_mem(mem: &str) -> Result<u64> {
     Ok(num*factor)
 }
 
-/// Creates a temporary file /tmp/<name>-XXXX, the X will be replaced by an arbitrary sequence
-pub fn create_tmp_file(name: &str) -> Result<String> {
-    match mkstemp(name) {
-        Ok((_, path)) => {
-            let new_name = path.to_str().unwrap();
-            debug!("Created tmp file with name {}", new_name);
-            Ok(new_name.to_string())
-        },
-        Err(_) => Err(Error::CannotCreateTmpFile())
+#[derive(Debug)]
+pub struct TmpFile {
+    path: PathBuf
+}
+
+impl TmpFile {
+    pub fn create(name: &str) -> Result<TmpFile> {
+        match mkstemp(name) {
+            Ok((fd, path)) => {
+                close(fd).map_err(|_| Error::CannotCreateTmpFile)?;
+                debug!("Created tmp file with name {}", path.display());
+                Ok(TmpFile { path: path })
+            },
+            Err(_) => Err(Error::CannotCreateTmpFile)
+        }
+    }
+
+    pub fn read_to_string(&self, buf: &mut String) -> Result<usize> {
+        match File::open(self.path.as_path()) {
+            Ok(mut file) => {
+                Ok(file.read_to_string(buf).map_err(|_| Error::CannotReadTmpFile(format!("{}", self.path.display())))?)
+            },
+            Err(_) => Err(Error::CannotReadTmpFile(format!("{}", self.path.display())))
+        }
+    }
+
+    pub fn get_path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    pub fn delete(&self) {
+        match remove_file(self.path.as_path()) {
+            Ok(_) => debug!("Deleted tmp file {}", self.path.display()),
+            Err(_) => {}
+        };
     }
 }
 
-/// Deletes a temporary file 
-pub fn delete_tmp_file(name: &str) -> Result<()> {
-    match unlink(name) {
-        Ok(_) => {
-            debug!("Deleted tmp file {}", name);
-            Ok(())
-        },
-        Err(_) => Err(Error::InvalidFile(name.into()))
+impl Drop for TmpFile {
+    fn drop(&mut self) {
+        self.delete();
     }
 }

@@ -7,13 +7,15 @@ mod socket;
 pub mod uhyve;
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::io::{BufReader, BufRead};
 use inotify::{Inotify, WatchMask};
 use std::env;
 use std::net::Ipv4Addr;
 
 use hermit::error::*;
+
+const BASE_PORT: u16 = 18766;
 
 pub static mut verbose: bool = false;
 
@@ -53,7 +55,6 @@ pub enum IsleParameter {
         additional: IsleParameterUhyve
     },
     Multi {
-        mem_size: u64,
         num_cpus: u32
     }
 }
@@ -67,7 +68,6 @@ impl IsleParameter {
         match isle_kind.as_str() {
             "multi" | "MULTI" | "Multi" => {
                 IsleParameter::Multi {
-                    mem_size: mem_size,
                     num_cpus: num_cpus
                 }
             },
@@ -117,18 +117,17 @@ impl IsleParameter {
 
 pub trait Isle {
     fn num(&self) -> u8;
-    fn log_file(&self) -> Option<String>;
-    fn log_path(&self) -> Option<String>;
-    fn cpu_path(&self) -> Option<String>;
+    fn log_file(&self) -> Option<&Path>;
 
-    fn output(&self) -> Result<String>;
+    fn output(&self) -> String;
 
     fn run(&mut self) -> Result<()>;
+    fn stop(&mut self) -> Result<i32>;
 
     fn is_available(&self) -> Result<bool> {
         let log = match self.log_file() {
             Some(f) => f,
-            None => return Ok(false)
+            None => return Ok(true)
         };
 
         // open the log file
@@ -148,21 +147,30 @@ pub trait Isle {
     }
 
     fn wait_until_available(&self) -> Result<()> {
+        if self.is_available()? {
+            return Ok(());
+        }
+        
         debug!("Wait for the HermitIsle to be available");
 
-        let mut ino = Inotify::init().unwrap();
+        let mut ino = Inotify::init().map_err(|_| Error::InotifyError)?;
 
         // watch on the log path
-        let log_path = match self.log_path() {
-            Some(f) => f,
+        let log_path = match self.log_file() {
+            Some(f) => {
+                let mut path = PathBuf::from(f);
+                path.pop();
+                path
+            },
             None => return Ok(())
         };
 
-        ino.add_watch(Path::new(&log_path), WatchMask::MODIFY | WatchMask::CREATE).unwrap();
+        ino.add_watch(log_path, WatchMask::MODIFY | WatchMask::CREATE).map_err(|_| Error::InotifyError)?;
 
         let mut buffer = [0; 1024];
         loop {
-            if let Some(_) = ino.read_events(&mut buffer).unwrap().next() {
+            let mut events = ino.read_events(&mut buffer).map_err(|_| Error::InotifyError)?;
+            if let Some(_) = events.next() {
                 if self.is_available()? {
                     return Ok(());
                 }
@@ -182,5 +190,4 @@ pub trait Isle {
             }*/
         }
     }
-
 }

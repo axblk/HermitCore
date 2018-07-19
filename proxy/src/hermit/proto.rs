@@ -1,7 +1,8 @@
 use std::io::{Read, Cursor};
 use std::mem;
-use byteorder::{ReadBytesExt, LittleEndian};
-use std::ffi::CString;
+use byteorder::{ReadBytesExt, NativeEndian};
+
+use hermit::error::*;
 
 const PACKET_LENGTH: &'static [u64] = &[1,3,1,1,2,3];
 
@@ -16,38 +17,38 @@ pub enum PartialPacket {
 }
 
 impl PartialPacket {
-    pub fn from_buf(id: i32, buf: &mut Cursor<Vec<u8>>) -> PartialPacket {
-        match id {
+    pub fn from_buf(id: i32, buf: &mut Cursor<Vec<u8>>) -> Result<PartialPacket> {
+        Ok(match id {
             0 => PartialPacket::Exit { 
-                arg: buf.read_i32::<LittleEndian>().unwrap() 
+                arg: buf.read_i32::<NativeEndian>().unwrap() 
             },
             1 => PartialPacket::Write {
-                fd: buf.read_i32::<LittleEndian>().unwrap(),
-                len: buf.read_u64::<LittleEndian>().unwrap()
+                fd: buf.read_i32::<NativeEndian>().unwrap(),
+                len: buf.read_u64::<NativeEndian>().unwrap()
             },
             2 => PartialPacket::Open {
-                len: buf.read_i64::<LittleEndian>().unwrap()
+                len: buf.read_i64::<NativeEndian>().unwrap()
             },
             3 => PartialPacket::Close {
-                fd: buf.read_i32::<LittleEndian>().unwrap()
+                fd: buf.read_i32::<NativeEndian>().unwrap()
             },
             4 => PartialPacket::Read {
-                fd: buf.read_i32::<LittleEndian>().unwrap(),
-                len: buf.read_u64::<LittleEndian>().unwrap()
+                fd: buf.read_i32::<NativeEndian>().unwrap(),
+                len: buf.read_u64::<NativeEndian>().unwrap()
             },
             5 => PartialPacket::LSeek {
-                fd: buf.read_i32::<LittleEndian>().unwrap(),
-                offset: buf.read_i64::<LittleEndian>().unwrap(),
-                whence: buf.read_i32::<LittleEndian>().unwrap()
+                fd: buf.read_i32::<NativeEndian>().unwrap(),
+                offset: buf.read_i64::<NativeEndian>().unwrap(),
+                whence: buf.read_i32::<NativeEndian>().unwrap()
             },
-            _ => panic!("")
-        }
+            _ => return Err(Error::ProxyPacket)
+        })
     }
 
     pub fn additional_size(&self) -> usize {
         match *self {
             PartialPacket::Write { fd: _, len } => len as usize,
-            PartialPacket::Open { len } => len as usize + 8,
+            PartialPacket::Open { len } => len as usize + 2 * mem::size_of::<i32>(),
             _ => 0
         }
     }
@@ -57,7 +58,7 @@ impl PartialPacket {
 pub enum Packet {
     Exit { arg: i32 },
     Write { fd: i32, buf: Vec<u8> },
-    Open { name: CString, flags: i32, mode: i32 },
+    Open { name: Vec<u8>, flags: i32, mode: u32 },
     Close { fd: i32 },
     Read { fd: i32, len: u64 },
     LSeek { fd: i32, whence: i32, offset: i64 }
@@ -66,28 +67,22 @@ pub enum Packet {
 impl Packet {
     pub fn from_buf(obj: &PartialPacket, buf: &mut Cursor<Vec<u8>>) -> Packet {
 
-        //println!("{:?}", *obj);
-
-
         match *obj {
             PartialPacket::Write { fd, len } => {
-                debug!("Read write packet with length {}", len);
                 let mut content = vec![0; len as usize];
-                buf.read(&mut content);
+                let _ = buf.read_exact(&mut content);
 
                 Packet::Write { fd: fd, buf: content }
             },
             PartialPacket::Open { len } => {
                 let mut name_buf = vec![0; len as usize];
-                buf.read(&mut name_buf);
+                let _ = buf.read_exact(&mut name_buf);
                 name_buf.pop();
 
-                let c_str = CString::new(name_buf).unwrap();
-
-                Packet::Open { 
-                    name: c_str, 
-                    flags: buf.read_i32::<LittleEndian>().unwrap(), 
-                    mode: buf.read_i32::<LittleEndian>().unwrap() 
+                Packet::Open {
+                    name: name_buf, 
+                    flags: buf.read_i32::<NativeEndian>().unwrap(), 
+                    mode: buf.read_u32::<NativeEndian>().unwrap() 
                 }
             },
             PartialPacket::Exit { arg } => Packet::Exit { arg },
@@ -107,37 +102,27 @@ pub enum State {
 }
 
 impl State {
-    pub fn read_in(self, buf: &mut Cursor<Vec<u8>>) -> State {
+    pub fn read_in(self, buf: &mut Cursor<Vec<u8>>) -> Result<State> {
         let length = buf.get_ref().len() - buf.position() as usize;
         
-        match self {
-            State::Id if length < mem::size_of::<isize>() => {
-                State::Id
-            },
-            State::Id => {
-                let id = buf.read_i32::<LittleEndian>().unwrap();
+        Ok(match self {
+            State::Id if length >= mem::size_of::<i32>() => {
+                let id = buf.read_i32::<NativeEndian>().unwrap();
                 State::Type { 
                     id: id, 
                     len: match id as usize {
                         x @ 0...5 => PACKET_LENGTH[x],
-                        _ => panic!("")
+                        _ => 0
                     }
                 }
             },
-            State::Type { id, len } => {
-                if length >= (len as usize) * mem::size_of::<i32>() {
-                    let par_packet = State::Partial(PartialPacket::from_buf(id, buf));
-                    debug!("Partial packet {:?} pos {}", par_packet, buf.position());
-
-                    par_packet
-                } else {
-                    self
-                }
+            State::Type { id, len } if length >= (len as usize) * mem::size_of::<i32>() => {
+                State::Partial(PartialPacket::from_buf(id, buf)?)
             },
             State::Partial(ref packet) if length >= packet.additional_size()  => {
-                    State::Finished(Packet::from_buf(packet, buf))
+                State::Finished(Packet::from_buf(packet, buf))
             },
-            _ => { self }
-        }
+            _ => self
+        })
     }
 }

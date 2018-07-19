@@ -1,19 +1,22 @@
 use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::io::{Write, Read};
 
 use hermit::Isle;
 use hermit::error::*;
 use hermit::socket::Socket;
+use hermit;
 
 pub struct Multi {
     num: u8,
-    socket: Option<Socket>
+    socket: Socket,
+    logfile: PathBuf
 }
 
 impl Multi {
-    pub fn new(num: u8, path: &str, mem_size: u64, num_cpus: u32) -> Result<Multi> {
+    pub fn new(num: u8, path: &str, num_cpus: u32) -> Result<Multi> {
         let cpu_path = format!("/sys/hermit/isle{}/path", num);
-        let bin_path= format!("/sys/hermit/isle{}/cpus", num);
+        let bin_path = format!("/sys/hermit/isle{}/cpus", num);
 
         // request a new isle, enforce close
         {
@@ -21,7 +24,7 @@ impl Multi {
                 .map_err(|_| Error::InvalidFile(bin_path.clone()))?;
 
             let mut cpus_file = File::create(&cpu_path)
-            .map_err(|_| Error::InvalidFile(cpu_path.clone()))?;
+                .map_err(|_| Error::InvalidFile(cpu_path.clone()))?;
             
             let cpus = num_cpus.to_string();
 
@@ -45,7 +48,9 @@ impl Multi {
             return Err(Error::MultiIsleFailed);
         }
 
-        Ok(Multi { num: num, socket: Some(Socket::new(18766)) })
+        let logfile = PathBuf::from(format!("/sys/hermit/isle{}/log", num));
+
+        Ok(Multi { num: num, socket: Socket::new(hermit::BASE_PORT), logfile: logfile })
     }
 }
 
@@ -54,28 +59,32 @@ impl Isle for Multi {
         self.num
     }
 
-    fn log_file(&self) -> Option<String> {
-        Some(format!("/sys/hermit/isle{}/log", self.num))
-    }
-
-    fn log_path(&self) -> Option<String> {
-        Some("/sys/hermit/".into())
-    }
-
-    fn cpu_path(&self) -> Option<String> {
-        Some(format!("/sys/hermit/isle{}/cpus", self.num))
+    fn log_file(&self) -> Option<&Path> {
+        return Some(self.logfile.as_path());
     }
 
     fn run(&mut self) -> Result<()> {
-        let mut socket = self.socket.take().ok_or(Error::InternalError)?;
-        socket.connect()?;
-
-        socket.run()?;
+        self.socket.connect()?;
+        self.socket.run()?;
 
         Ok(())
     }
 
-    fn output(&self) -> Result<String> {
-        Ok("".into())
+    fn stop(&mut self) -> Result<i32> {
+        debug!("Stop the HermitIsle");
+
+        let cpu_path = format!("/sys/hermit/isle{}/path", self.num);
+
+        let mut cpus_file = File::create(&cpu_path)
+            .map_err(|_| Error::InvalidFile(cpu_path.clone()))?;
+
+        cpus_file.write("-1".as_bytes())
+            .map_err(|_| Error::InvalidFile(cpu_path))?;
+    
+        Ok(0)
+    }
+
+    fn output(&self) -> String {
+        "".into()
     }
 }

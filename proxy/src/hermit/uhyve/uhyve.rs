@@ -3,6 +3,7 @@
 
 use std::ptr;
 use std::fs::{File,OpenOptions};
+use std::path::Path;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use libc;
@@ -127,15 +128,7 @@ impl Isle for Uhyve {
         0
     }
 
-    fn log_file(&self) -> Option<String> {
-        None
-    }
-
-    fn log_path(&self) -> Option<String> {
-        None
-    }
-
-    fn cpu_path(&self) -> Option<String> {
+    fn log_file(&self) -> Option<&Path> {
         None
     }
 
@@ -143,7 +136,11 @@ impl Isle for Uhyve {
         self.vm.run().map(|_| ())
     }
 
-    fn output(&self) -> Result<String> {
+    fn stop(&mut self) -> Result<i32> {
+        self.vm.stop()
+    }
+
+    fn output(&self) -> String {
         self.vm.output()
     }
 }

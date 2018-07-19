@@ -3,7 +3,7 @@ use errno::errno;
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Error {
     InternalError,
     NotEnoughMemory,
@@ -12,15 +12,17 @@ pub enum Error {
     KernelNotLoaded,
     MissingFrequency,
     MultiIsleFailed,
-    CannotCreateTmpFile(),
-    QEmu((String, String)),
-    MissingBinary,
+    CannotCreateTmpFile,
+    CannotReadTmpFile(String),
+    MissingQEmuBinary,
     Protocol(String),
     ParseMemory,
-    WrongIsleNumber
+    ProxyConnect,
+    ProxyPacket,
+    InotifyError,
 }
 
-impl fmt::Debug for Error {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::InternalError => write!(f, "An internal error has occurred, please report."),
@@ -34,12 +36,14 @@ impl fmt::Debug for Error {
             Error::KernelNotLoaded => write!(f, "Please load the kernel before you start the virtual machine."),
             Error::MissingFrequency => write!(f, "Couldn't get the CPU frequency from your system. (is /proc/cpuinfo missing?)"),
             Error::MultiIsleFailed => write!(f, "The Multi isle was selected on a system without support, please load the kernel driver."),
-            Error::CannotCreateTmpFile() => write!(f, "Couldn't create a tmp file in /tmp."),
-            Error::QEmu((_, ref stderr)) => write!(f, "The qemu binary has encountered an error: {}", stderr),
-            Error::MissingBinary => write!(f, "Please specify a binary."),
+            Error::CannotCreateTmpFile => write!(f, "Could not create a tmp file."),
+            Error::CannotReadTmpFile(ref file) => write!(f, "Could not read tmp file: {}", file),
+            Error::MissingQEmuBinary => write!(f, "Could not find the qemu binary."),
             Error::Protocol(ref err) => write!(f, "{}", err),
             Error::ParseMemory => write!(f, "Couldn't parse the guest memory size from the environment"),
-            Error::WrongIsleNumber => write!(f, "Unknown isle number")
+            Error::ProxyConnect => write!(f, "Proxy: connection error"),
+            Error::ProxyPacket => write!(f, "Could not read proxy packet"),
+            Error::InotifyError => write!(f, "Inotify error")
         }
     }
 }
