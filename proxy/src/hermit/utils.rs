@@ -13,7 +13,7 @@ pub fn cpufreq() -> Result<u32> {
     // If the file cpuinfo_max_freq exists, parse the content and return the frequency
     if let Ok(mut file) = File::open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq") {
         file.read_to_string(&mut content).map_err(|_| Error::MissingFrequency)?;
-        return content.trim().parse::<u32>().map_err(|_| Error::MissingFrequency);
+        return content.trim().parse::<u32>().map_err(|_| Error::MissingFrequency).map(|x| x / 1000);
     } 
     // otherwise use the more acurate cpuinfo file and search for the right line
     else if let Ok(mut file) = File::open("/proc/cpuinfo") {

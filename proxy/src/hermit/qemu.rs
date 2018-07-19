@@ -57,7 +57,7 @@ impl QEmu {
         let mut hostfwd = format!("user,hostfwd=tcp:127.0.0.1:{}-:{}", port, hermit::BASE_PORT);
         let monitor_str = format!("telnet:127.0.0.1:{},server,nowait", port+1);
         let chardev = format!("file,id=gnc0,path={}", &tmp_file.display());
-        let freq = format!("\"-freq{} -proxy\"",(utils::cpufreq().unwrap()/1000).to_string());
+        let freq = format!("\"-freq{} -proxy\"", utils::cpufreq().unwrap().to_string());
         let num_cpus = num_cpus.to_string();
         let mem_size = format!("{}B", mem_size);
 

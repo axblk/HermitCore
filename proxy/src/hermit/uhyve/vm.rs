@@ -114,7 +114,7 @@ impl VirtualMachine {
             unsafe {
                 *(ptr.offset(0x08) as *mut u64) = header.paddr;   // physical start addr
                 *(ptr.offset(0x10) as *mut u64) = vm_mem_length;  // physical size limit
-                *(ptr.offset(0x18) as *mut u32) = utils::cpufreq()? / 1000; // CPU frequency
+                *(ptr.offset(0x18) as *mut u32) = utils::cpufreq()?; // CPU frequency
                 *(ptr.offset(0x24) as *mut u32) = 1;              // number of used CPUs
                 *(ptr.offset(0x30) as *mut u32) = 0;              // apicid (?)
                 *(ptr.offset(0x38) as *mut u64) = header.memsz;  // 
