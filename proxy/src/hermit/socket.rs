@@ -9,19 +9,23 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::os::unix::net::UnixStream;
-use bincode::{serialize, Infinite};
+use bincode::{serialize, deserialize, Infinite};
 
 use hermit::proto;
 use hermit::proto::Packet;
 use hermit::error::{Error, Result};
-
-use daemon::ActionResult;
 
 use libc;
 
 const HERMIT_MAGIC: u32 = 0x7E317;
 
 pub type Console = Arc<Mutex<Vec<UnixStream>>>;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ActionResult {
+    Output(String),
+    OutputErr(String)
+}
 
 #[derive(Debug)]
 pub struct Socket {

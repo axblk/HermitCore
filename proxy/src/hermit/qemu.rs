@@ -199,9 +199,7 @@ impl Isle for QEmu {
         let mut socket = self.socket.take().ok_or(Error::InternalError)?;
         socket.connect()?;
 
-        thread::spawn(move || {
-            socket.run();
-        });
+        socket.run();
 
         Ok(())
     }

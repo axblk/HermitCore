@@ -6,7 +6,6 @@ use std::slice;
 
 use super::{Error, Result};
 use hermit::socket::Console;
-use daemon::ActionResult;
 
 const PORT_WRITE: u16 = 0x499;
 const PORT_OPEN: u16 = 0x500;
@@ -14,6 +13,12 @@ const PORT_CLOSE: u16 = 0x501;
 const PORT_READ: u16 = 0x502;
 const PORT_EXIT: u16 = 0x503;
 const PORT_LSEEK: u16 = 0x504;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ActionResult {
+    Output(String),
+    OutputErr(String)
+}
 
 #[repr(packed)]
 pub struct Write {

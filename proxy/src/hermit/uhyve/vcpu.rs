@@ -6,7 +6,7 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use std::intrinsics::{volatile_load,volatile_store};
 use std::thread;
 use std::thread::current;
-use std::ptr::Unique;
+//use std::ptr::Unique;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
