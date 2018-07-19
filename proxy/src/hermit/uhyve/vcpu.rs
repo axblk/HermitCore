@@ -45,6 +45,23 @@ pub const X86_PDPT_P:  u64 = (1 << 0);
 pub const X86_PDPT_RW: u64 = (1 << 1);
 pub const X86_PDPT_PS: u64 = (1 << 7);
 
+/// EFER bits:
+pub const _EFER_SCE:    u64 = 0;  /* SYSCALL/SYSRET */
+pub const _EFER_LME:    u64 = 8;  /* Long mode enable */
+pub const _EFER_LMA:    u64 = 10; /* Long mode active (read-only) */
+pub const _EFER_NX:     u64 = 11; /* No execute enable */
+pub const _EFER_SVME:   u64 = 12; /* Enable virtualization */
+pub const _EFER_LMSLE:  u64 = 13; /* Long Mode Segment Limit Enable */
+pub const _EFER_FFXSR:  u64 = 14; /* Enable Fast FXSAVE/FXRSTOR */
+
+pub const EFER_SCE:     u64 = (1<<_EFER_SCE);
+pub const EFER_LME:     u64 = (1<<_EFER_LME);
+pub const EFER_LMA:     u64 = (1<<_EFER_LMA);
+pub const EFER_NX:      u64 = (1<<_EFER_NX);
+pub const EFER_SVME:    u64 = (1<<_EFER_SVME);
+pub const EFER_LMSLE:   u64 = (1<<_EFER_LMSLE);
+pub const EFER_FFXSR:   u64 = (1<<_EFER_FFXSR);
+
 pub enum ExitCode {
     Cause(Result<i32>),
     Innocent
@@ -322,7 +339,8 @@ impl VirtualCPU {
 
     pub fn setup_system_64bit(&self, sregs: &mut kvm_sregs) -> Result<()> {
         sregs.cr0 |= X86_CR0_PE;
-        sregs.efer |= 1 << 8;
+        sregs.cr4 |= X86_CR4_PAE;
+        sregs.efer |= EFER_LME|EFER_LMA;
 
         Ok(())
     }
