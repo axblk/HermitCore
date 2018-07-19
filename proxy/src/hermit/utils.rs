@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::ffi::CString;
 use std::io::Read;
 
 use nix::unistd::{mkstemp, unlink};

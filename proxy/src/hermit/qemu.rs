@@ -97,7 +97,8 @@ impl QEmu {
             "-device", "pci-serial,chardev=gnc0",
             "-kernel", &exe,
             "-initrd", path,
-            "-append", &freq];
+            "-append", &freq,
+            "-no-acpi"];
 
         let app_port = add.app_port;
         if app_port != 0 {
