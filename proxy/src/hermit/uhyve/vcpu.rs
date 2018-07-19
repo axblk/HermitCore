@@ -9,9 +9,10 @@ use std::thread;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
+use nix::errno::Errno;
+use nix;
 
 use memmap::{MmapMut, MmapOptions};
-use errno::errno;
 
 use hermit::uhyve;
 use hermit::uhyve::kvm_header::*;
@@ -137,17 +138,16 @@ pub struct kvm_msr_data {
 
 impl VirtualCPU {
     pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, mem: &mut MmapMut, mboot: *mut u8, running_state: Arc<AtomicBool>, extensions: KVMExtensions) -> Result<VirtualCPU> {
-        
+
         // create a new VCPU and save the file descriptor
         let fd = VirtualCPU::create_vcpu(vm_fd, id as i32)?;
-
         debug!("New virtual CPU with id {} and FD {}", id, fd);
 
         let file = unsafe { File::from_raw_fd(fd) };
 
         let size = VirtualCPU::get_mmap_size(kvm_fd)?;
         let mut run_mem = unsafe { MmapOptions::new().len(size).map_mut(&file) }
-                .map_err(|x| panic!("{:?}", x) )?;
+            .map_err(|_| Error::NotEnoughMemory)?;
       
         // forget the file, we don't want to close the file descriptor
         mem::forget(file);
@@ -260,8 +260,8 @@ impl VirtualCPU {
         Ok(cpu_state)
     }
 
-    fn print_registers(&self) -> Result<()> {
-        utils::show_registers(self.id, &self.get_regs()?, &self.get_sregs()?);
+    pub fn print_registers(id: u32, vcpu_fd: i32) -> Result<()> {
+        utils::show_registers(id, &VirtualCPU::get_regs_fd(vcpu_fd)?, &VirtualCPU::get_sregs_fd(vcpu_fd)?);
         Ok(())
     }
 
@@ -272,14 +272,18 @@ impl VirtualCPU {
         }
     }   
 
-    fn get_sregs(&self) -> Result<kvm_sregs> {
+    fn get_sregs_fd(vcpu_fd: i32) -> Result<kvm_sregs> {
         let mut sregs = kvm_sregs::default();
         unsafe {
-            uhyve::ioctl::get_sregs(self.vcpu_fd, (&mut sregs) as *mut kvm_sregs)
+            uhyve::ioctl::get_sregs(vcpu_fd, (&mut sregs) as *mut kvm_sregs)
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetSRegs))?;
         }
 
         Ok(sregs)
+    }
+
+    fn get_sregs(&self) -> Result<kvm_sregs> {
+        VirtualCPU::get_sregs_fd(self.vcpu_fd)
     }
 
     pub fn set_sregs(&self, mut sregs: kvm_sregs) -> Result<()> {
@@ -291,14 +295,18 @@ impl VirtualCPU {
         Ok(())
     }
 
-    fn get_regs(&self) -> Result<kvm_regs> {
+    fn get_regs_fd(vcpu_fd: i32) -> Result<kvm_regs> {
         let mut regs = kvm_regs::default();
         unsafe {
-            uhyve::ioctl::get_regs(self.vcpu_fd, (&mut regs) as *mut kvm_regs)
+            uhyve::ioctl::get_regs(vcpu_fd, (&mut regs) as *mut kvm_regs)
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetRegs))?;
         }
 
         Ok(regs)
+    }
+
+    fn get_regs(&self) -> Result<kvm_regs> {
+        VirtualCPU::get_regs_fd(self.vcpu_fd)
     }
 
     fn set_regs(&self, mut regs: kvm_regs) -> Result<()> {
@@ -468,31 +476,35 @@ impl VirtualCPU {
         Ok(())
     }
 
-    pub fn single_run(fd: RawFd, state: &Arc<SharedState>) -> Result<proto::Return> {
-        let ret = unsafe {
-            uhyve::ioctl::run(fd, ptr::null_mut())
-                .map_err(|_| Error::IOCTL(NameIOCTL::Run))
-        }?;
+    pub fn single_run(fd: RawFd, id: u32, state: &Arc<SharedState>) -> Result<proto::Return> {
+        let ret = unsafe { uhyve::ioctl::run(fd, ptr::null_mut()) };
 
-        debug!("Single Run CPU {}", fd);
+        debug!("Single Run CPU {}", id);
 
-        if ret == -1 {
-            match errno().0 {
-                libc::EINTR => { return Ok(proto::Return::Continue); },
-                libc::EFAULT => {
-                    // TODO
-                    panic!("translation fault!");
+        if let Err(e) = ret {
+            return match e {
+                nix::Error::Sys(errno) => match errno {
+                    Errno::EINTR => Ok(proto::Return::Continue),
+                    Errno::EFAULT => {
+                        let regs = VirtualCPU::get_regs_fd(fd)?;
+                        Err(Error::TranslationFault(regs.rip))
+                    },
+                    _ => Err(Error::IOCTL(NameIOCTL::Run))
                 },
-                _ => {
-                    panic!("KVM: ioctl KVM_RUN in vcpu_loop failed");
-                }
+                _ => Err(Error::IOCTL(NameIOCTL::Run))
             }
         }
 
         unsafe {
-            let a = proto::Syscall::from_mem(state.run_mem.as_ptr(), state.guest_mem).run(state.guest_mem);
-        
-            a
+            let res = proto::Syscall::from_mem(state.run_mem.as_ptr(), state.guest_mem)?.run(state.guest_mem);
+            if let Err(e) = &res {
+                match e {
+                    Error::KVMDebug => { let _ = VirtualCPU::print_registers(id, fd); },
+                    _ => {}
+                };
+            }
+
+            res
         }
     }
 
@@ -506,7 +518,7 @@ impl VirtualCPU {
         }
 
         while state.running_state.load(Ordering::Relaxed) {
-            match VirtualCPU::single_run(fd, &state) {
+            match VirtualCPU::single_run(fd, id, &state) {
                 Ok(proto::Return::Exit(code)) => {
                     state.running_state.store(false, Ordering::Relaxed);
 
@@ -648,5 +660,11 @@ impl VirtualCPU {
     }
 }
 
-unsafe impl Sync for SharedState { }
+impl Drop for VirtualCPU {
+    fn drop(&mut self) {
+        let _ = ::nix::unistd::close(self.vcpu_fd);
+    }
+}
+
+unsafe impl Sync for SharedState {}
 unsafe impl Send for SharedState {}

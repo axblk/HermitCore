@@ -28,7 +28,10 @@ pub enum Error {
     MigrationConnection,
     MigrationStream,
     NoCheckpointFile,
-    VCPUStatesNotInitialized
+    VCPUStatesNotInitialized,
+    TranslationFault(u64),
+    KVMRunFailed(u32),
+    KVMDebug
 }
 
 impl fmt::Display for Error {
@@ -51,13 +54,16 @@ impl fmt::Display for Error {
             Error::InotifyError => write!(f, "Inotify error"),
             Error::UnsupportedMigrationType(ref name) => write!(f, "Migration type '{}' not supported.", name),
             Error::KVMConnection => write!(f, "Could not open: /dev/kvm"),
-            Error::InvalidCheckpoint =>  write!(f, "Invalid checkpoint data"),
-            Error::KVMApiVersion(version) =>  write!(f, "KVM: API version is {}, uhyve requires version 12", version),
-            Error::CAPIRQFD =>  write!(f, "The support of KVM_CAP_IRQFD is curently required"),
-            Error::MigrationConnection =>  write!(f, "Migration connection error"),
-            Error::MigrationStream =>  write!(f, "Migration stream error"),
-            Error::NoCheckpointFile =>  write!(f, "Could notfind a checkpoint file"),
-            Error::VCPUStatesNotInitialized =>  write!(f, "vcpu states not initialized")
+            Error::InvalidCheckpoint => write!(f, "Invalid checkpoint data"),
+            Error::KVMApiVersion(version) => write!(f, "KVM: API version is {}, uhyve requires version 12", version),
+            Error::CAPIRQFD => write!(f, "The support of KVM_CAP_IRQFD is curently required"),
+            Error::MigrationConnection => write!(f, "Migration connection error"),
+            Error::MigrationStream => write!(f, "Migration stream error"),
+            Error::NoCheckpointFile => write!(f, "Could notfind a checkpoint file"),
+            Error::VCPUStatesNotInitialized => write!(f, "vcpu states not initialized"),
+            Error::TranslationFault(rip) => write!(f, "KVM: host/guest translation fault: rip={:#x}", rip),
+            Error::KVMRunFailed(cpuid) => write!(f, "KVM: ioctl KVM_RUN in vcpu_loop for cpuid {} failed", cpuid),
+            Error::KVMDebug => write!(f, "KVM: debug")
         }
     }
 }

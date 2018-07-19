@@ -522,16 +522,18 @@ impl VirtualMachine {
         unsafe { *(self.mboot.unwrap().offset(0x24) as *mut u32) = self.num_cpus; }
         self.running_state.store(true, Ordering::Relaxed);
 
-        let mut count = 1;
-        for vcpu in &self.vcpus {
-            if count == self.vcpus.len() {
-                vcpu.run();
-            } else {
-                self.thread_handles.push(vcpu.run_threaded());
-            }
-            count += 1;
+        for vcpu in &self.vcpus[1..] {
+            self.thread_handles.push(vcpu.run_threaded());
         }
 
+        let res = self.vcpus[0].run();
+
+        //self.stop()?;
+
+        match res {
+            ExitCode::Innocent => {},
+            ExitCode::Cause(cause) => { if let Err(e) = cause { return Err(e) } }
+        };
         Ok(())
     }
 
@@ -543,9 +545,7 @@ impl VirtualMachine {
             if let Ok(ret) = handle.join() {
                 match ret {
                     ExitCode::Innocent => continue,
-                    ExitCode::Cause(cause) => {
-                        reason = cause;
-                    }
+                    ExitCode::Cause(cause) => reason = cause
                 }
             }
         }
@@ -567,5 +567,6 @@ impl Drop for VirtualMachine {
         debug!("Drop the Virtual Machine");
         //debug!("-------- Output --------");
         //debug!("{}", self.output());
+        let _ = ::nix::unistd::close(self.vm_fd);
     }
 }
