@@ -28,11 +28,7 @@ impl fmt::Display for Error {
             Error::InternalError => write!(f, "An internal error has occurred, please report."),
             Error::NotEnoughMemory => write!(f, "The host system has not enough memory, please check your memory usage."),
             Error::InvalidFile(ref file) => write!(f, "The file {} was not found or is invalid.", file),
-            Error::IOCTL(ref name) => {
-                let e = errno();
-
-                write!(f, "The IOCTL command {:?} has failed: {}", name, e)
-            },
+            Error::IOCTL(ref name) => write!(f, "The IOCTL command {:?} has failed: {}", name, errno()),
             Error::KernelNotLoaded => write!(f, "Please load the kernel before you start the virtual machine."),
             Error::MissingFrequency => write!(f, "Couldn't get the CPU frequency from your system. (is /proc/cpuinfo missing?)"),
             Error::MultiIsleFailed => write!(f, "The Multi isle was selected on a system without support, please load the kernel driver."),

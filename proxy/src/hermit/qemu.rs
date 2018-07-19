@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{ChildStdout, ChildStderr};
 use std::env;
 use nix::sys::signal::{kill, SIGINT};
+use nix::unistd::Pid;
 
 use hermit::{Isle, IsleParameterQEmu};
 use hermit::utils;
@@ -145,7 +146,7 @@ impl Isle for QEmu {
 
         if let Ok(id) = id_str.parse::<i32>() {
             if id >= 0 {
-                let _ = kill(id, SIGINT);
+                let _ = kill(Pid::from_raw(id), SIGINT);
             }
         }
 

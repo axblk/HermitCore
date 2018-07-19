@@ -1,6 +1,7 @@
 use libc;
 use libc::c_void;
-use std::{mem, ptr};
+use std::mem;
+use std::ptr;
 use std::fs::File;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::intrinsics::{volatile_load,volatile_store};
@@ -13,7 +14,7 @@ use memmap::{Mmap, Protection};
 use errno::errno;
 
 use hermit::uhyve;
-use super::kvm_header::{kvm_sregs, kvm_regs, kvm_segment, kvm_cpuid2,kvm_cpuid2_header, KVM_MP_STATE_RUNNABLE, kvm_mp_state};
+use super::kvm_header::{kvm_sregs, kvm_regs, kvm_segment, kvm_cpuid2, KVM_MP_STATE_RUNNABLE, kvm_mp_state, kvm_cpuid_entry2};
 use super::{Result, Error, NameIOCTL};
 use super::gdt;
 use super::proto;
@@ -80,11 +81,17 @@ pub struct VirtualCPU {
     state: Arc<SharedState>
 }
 
+#[repr(C)]
+struct kvm_cpuid2_data {
+    header: kvm_cpuid2,
+    data: [kvm_cpuid_entry2; 100]
+}
+
 impl VirtualCPU {
     pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, entry: u64, mem: &mut Mmap, mboot: *mut u8, running_state: Arc<AtomicBool>) -> Result<VirtualCPU> {
         
         // create a new VCPU and save the file descriptor
-        let fd = VirtualCPU::create_vcpu(vm_fd, id as u32)?;
+        let fd = VirtualCPU::create_vcpu(vm_fd, id as i32)?;
 
         debug!("New virtual CPU with id {} and FD {}", id, fd);
 
@@ -121,7 +128,7 @@ impl VirtualCPU {
 
         debug!("Initialize the register of {} with start address {:?}", id, entry);
 
-        let mut regs = kvm_regs::empty();
+        let mut regs = kvm_regs::default();
         regs.rip = entry;
         regs.rflags = 0x2;
         cpu.set_regs(regs)?;
@@ -129,15 +136,15 @@ impl VirtualCPU {
         Ok(cpu)
     }
 
-    pub fn create_vcpu(fd: RawFd, id: u32) -> Result<RawFd> {
-        unsafe { 
-            uhyve::ioctl::create_vcpu(fd, id as *mut u8)
+    fn create_vcpu(fd: RawFd, id: i32) -> Result<RawFd> {
+        unsafe {
+            uhyve::ioctl::create_vcpu(fd, id)
                 .map_err(|_| Error::IOCTL(NameIOCTL::CreateVcpu))
         }
     }   
 
-    pub fn get_sregs(&self) -> Result<kvm_sregs> {
-        let mut sregs = kvm_sregs::empty();
+    fn get_sregs(&self) -> Result<kvm_sregs> {
+        let mut sregs = kvm_sregs::default();
         unsafe {
             uhyve::ioctl::get_sregs(self.vcpu_fd, (&mut sregs) as *mut kvm_sregs)
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetSRegs))?;
@@ -155,7 +162,7 @@ impl VirtualCPU {
         Ok(())
     }
 
-    pub fn set_regs(&self, mut regs: kvm_regs) -> Result<()> {
+    fn set_regs(&self, mut regs: kvm_regs) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_regs(self.vcpu_fd, (&mut regs) as *mut kvm_regs)
                 .map_err(|_| Error::IOCTL(NameIOCTL::SetSRegs))?;
@@ -164,34 +171,35 @@ impl VirtualCPU {
         Ok(())
     }
 
-    pub fn get_supported_cpuid(&self) -> Result<kvm_cpuid2> {
-        let mut cpuid = kvm_cpuid2::empty();
+    fn get_supported_cpuid(&self) -> Result<kvm_cpuid2_data> {
+        let mut cpuid = kvm_cpuid2_data { header: kvm_cpuid2::default(), data: [kvm_cpuid_entry2::default();100] };
+        cpuid.header.nent = 100;
 
         unsafe {
-            uhyve::ioctl::get_supported_cpuid(self.kvm_fd, (&mut cpuid.header) as *mut kvm_cpuid2_header)
+            uhyve::ioctl::get_supported_cpuid(self.kvm_fd, (&mut cpuid.header) as *mut kvm_cpuid2)
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetSupportedCpuID))?;
         }
 
         Ok(cpuid)
     }
 
-    pub fn set_cpuid2(&self, mut cpuid: kvm_cpuid2) -> Result<()> {
+    fn set_cpuid2(&self, mut cpuid: kvm_cpuid2_data) -> Result<()> {
         unsafe {
-            uhyve::ioctl::set_cpuid2(self.vcpu_fd, (&mut cpuid.header) as *mut kvm_cpuid2_header)
+            uhyve::ioctl::set_cpuid2(self.vcpu_fd, (&mut cpuid.header) as *mut kvm_cpuid2)
                 .map_err(|_| Error::IOCTL(NameIOCTL::SetCpuID2))?;
         }
 
         Ok(())
     }
    
-    pub fn get_mmap_size(vcpu_fd: RawFd) -> Result<usize> {
+    fn get_mmap_size(vcpu_fd: RawFd) -> Result<usize> {
         unsafe {
             uhyve::ioctl::get_vcpu_mmap_size(vcpu_fd, ptr::null_mut())
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetVCPUMMAPSize)).map(|x| { x as usize})
         }
     }
     
-    pub fn set_mp_state(&self, mp_state: kvm_mp_state) -> Result<()> {
+    fn set_mp_state(&self, mp_state: kvm_mp_state) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_mp_state(self.vcpu_fd, (&mp_state) as *const kvm_mp_state)
                 .map_err(|_| Error::IOCTL(NameIOCTL::SetMPState)).map(|_| ())
@@ -288,7 +296,7 @@ impl VirtualCPU {
     }
 
     pub fn setup_system_gdt(&self, sregs: &mut kvm_sregs, offset: u64) -> Result<()> {
-        let (mut data_seg, mut code_seg) = (kvm_segment::empty(), kvm_segment::empty());               
+        let (mut data_seg, mut code_seg) = (kvm_segment::default(), kvm_segment::default());               
         
         // create the GDT entries
         let gdt_null = gdt::Entry::new(0, 0, 0);
@@ -354,7 +362,7 @@ impl VirtualCPU {
     pub fn setup_cpuid(&self) -> Result<()> {
         let mut kvm_cpuid = self.get_supported_cpuid()?;
 
-        for entry in kvm_cpuid.data.iter_mut() {
+        for entry in kvm_cpuid.data[0 .. kvm_cpuid.header.nent as usize].iter_mut() {
             match entry.function {
                 1 => {
                     entry.ecx |= 1u32 << 31; // propagate that we are running on a hypervisor

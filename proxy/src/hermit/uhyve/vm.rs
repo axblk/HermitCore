@@ -2,7 +2,6 @@
 //! VM layer
 
 use libc;
-use std::ptr;
 use std::io::Cursor;
 use memmap::{Mmap, Protection};
 use elf;
@@ -11,15 +10,20 @@ use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::ptr;
 
 use hermit::is_verbose;
 use hermit::IsleParameterUhyve;
 use hermit::utils;
 use hermit::uhyve;
-use super::kvm_header::{kvm_userspace_memory_region, KVM_CAP_SYNC_MMU, KVM_32BIT_GAP_START, KVM_32BIT_GAP_SIZE, kvm_sregs};
+use super::kvm_header::{kvm_userspace_memory_region, KVM_CAP_SYNC_MMU, kvm_sregs};
 use super::{Result, Error, NameIOCTL};
 use super::vcpu::{ExitCode, VirtualCPU};
 use super::proto::PORT_UART;
+
+pub const KVM_32BIT_MAX_MEM_SIZE:   usize = 1 << 32;
+pub const KVM_32BIT_GAP_SIZE:       usize = 768 << 20;
+pub const KVM_32BIT_GAP_START:      usize = KVM_32BIT_MAX_MEM_SIZE - KVM_32BIT_GAP_SIZE;
 
 //use byteorder::ByteOrder;
 // guest offset?
