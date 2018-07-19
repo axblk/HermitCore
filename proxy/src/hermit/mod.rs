@@ -9,7 +9,7 @@ pub mod uhyve;
 use std::fs::File;
 use std::path::Path;
 use std::io::{BufReader, BufRead};
-use inotify::{Inotify, watch_mask};
+use inotify::{Inotify, WatchMask};
 use std::env;
 
 use hermit::error::*;
@@ -131,7 +131,7 @@ pub trait Isle {
             None => return Ok(())
         };
 
-        ino.add_watch(Path::new(&log_path), watch_mask::MODIFY | watch_mask::CREATE).unwrap();
+        ino.add_watch(Path::new(&log_path), WatchMask::MODIFY | WatchMask::CREATE).unwrap();
 
         let mut buffer = [0; 1024];
         loop {
