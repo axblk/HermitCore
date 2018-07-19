@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use hermit::is_verbose;
+use hermit::IsleParameterUhyve;
 use hermit::utils;
 use hermit::uhyve;
 use super::kvm_header::{kvm_userspace_memory_region, KVM_CAP_SYNC_MMU, KVM_32BIT_GAP_START, KVM_32BIT_GAP_SIZE, kvm_sregs};
@@ -58,7 +59,7 @@ impl VirtualMachine {
     }
 
     /// Loads a kernel from path and initialite mem and elf_entry
-    pub fn load_kernel(&mut self, path: &str) -> Result<()> {
+    pub fn load_kernel(&mut self, path: &str, add: IsleParameterUhyve) -> Result<()> {
         debug!("Load kernel from {}", path);
 
         // open the file in read only
@@ -116,6 +117,30 @@ impl VirtualMachine {
                 *(ptr.offset(0x94) as *mut u32) = 1;              // announce uhyve
                 if is_verbose() {
                     *(ptr.offset(0x98) as *mut u64) = PORT_UART as u64;              // announce uhyve
+                }
+
+                if let Some(ip) = add.ip {
+                    let data = ip.octets();
+                    *(ptr.offset(0xB0) as *mut u8) = data[0];
+                    *(ptr.offset(0xB1) as *mut u8) = data[1];
+                    *(ptr.offset(0xB2) as *mut u8) = data[2];
+                    *(ptr.offset(0xB3) as *mut u8) = data[3];
+                }
+
+                if let Some(gateway) = add.gateway {
+                    let data = gateway.octets();
+                    *(ptr.offset(0xB4) as *mut u8) = data[0];
+                    *(ptr.offset(0xB5) as *mut u8) = data[1];
+                    *(ptr.offset(0xB6) as *mut u8) = data[2];
+                    *(ptr.offset(0xB7) as *mut u8) = data[3];
+                }
+
+                if let Some(mask) = add.mask {
+                    let data = mask.octets();
+                    *(ptr.offset(0xB8) as *mut u8) = data[0];
+                    *(ptr.offset(0xB9) as *mut u8) = data[1];
+                    *(ptr.offset(0xBA) as *mut u8) = data[2];
+                    *(ptr.offset(0xBB) as *mut u8) = data[3];
                 }
 
                 self.klog = Some(vm_mem.as_ptr().offset(header.paddr as isize + 0x5000) as *const i8);

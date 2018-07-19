@@ -11,6 +11,7 @@ use std::path::Path;
 use std::io::{BufReader, BufRead};
 use inotify::{Inotify, WatchMask};
 use std::env;
+use std::net::Ipv4Addr;
 
 use hermit::error::*;
 
@@ -32,6 +33,14 @@ pub struct IsleParameterQEmu {
 }
 
 #[derive(Debug, Clone)]
+pub struct IsleParameterUhyve {
+    netif: Option<String>,
+    ip: Option<Ipv4Addr>,
+    gateway: Option<Ipv4Addr>,
+    mask: Option<Ipv4Addr>,
+}
+
+#[derive(Debug, Clone)]
 pub enum IsleParameter {
     QEmu {
         mem_size: u64,
@@ -40,7 +49,8 @@ pub enum IsleParameter {
     },
     UHyve {
         mem_size: u64,
-        num_cpus: u32
+        num_cpus: u32,
+        additional: IsleParameterUhyve
     },
     Multi {
         mem_size: u64,
@@ -62,9 +72,20 @@ impl IsleParameter {
                 }
             },
             "uhyve" | "UHyve" | "UHYVE" => {
+                let netif = env::var("HERMIT_NETIF").map(|x| Some(x)).unwrap_or(None);
+                let ip: Option<Ipv4Addr> = env::var("HERMIT_IP").map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None);
+                let gateway: Option<Ipv4Addr> = env::var("HERMIT_GATEWAY").map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None);
+                let mask: Option<Ipv4Addr> = env::var("HERMIT_MASK").map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None);
+
                 IsleParameter::UHyve {
                     mem_size: mem_size,
-                    num_cpus: num_cpus
+                    num_cpus: num_cpus,
+                    additional: IsleParameterUhyve {
+                        netif: netif,
+                        ip: ip,
+                        gateway: gateway,
+                        mask: mask
+                    }
                 }
             },
             _ => {

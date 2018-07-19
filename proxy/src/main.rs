@@ -32,9 +32,9 @@ use hermit::error::Result;
 
 fn create_isle(path: &str, specs: IsleParameter) -> Result<Box<Isle>> {
     let mut isle: Box<Isle> = match specs {
-        IsleParameter::QEmu { mem_size, num_cpus, additional} => Box::new(QEmu::new(&path, mem_size, num_cpus, additional)?),
-        IsleParameter::UHyve{ mem_size, num_cpus } => Box::new(Uhyve::new(&path, mem_size, num_cpus)?),
-        IsleParameter::Multi{ mem_size, num_cpus } => Box::new(Multi::new(0, &path, mem_size, num_cpus)?)
+        IsleParameter::QEmu { mem_size, num_cpus, additional} => Box::new(QEmu::new(path, mem_size, num_cpus, additional)?),
+        IsleParameter::UHyve{ mem_size, num_cpus, additional } => Box::new(Uhyve::new(path, mem_size, num_cpus, additional)?),
+        IsleParameter::Multi{ mem_size, num_cpus } => Box::new(Multi::new(0, path, mem_size, num_cpus)?)
     };
 
     isle.run()?;

@@ -7,7 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use libc;
 
-use hermit::Isle;
+use hermit::{Isle, IsleParameterUhyve};
 use super::{Error, Result, NameIOCTL};
 use super::vm::VirtualMachine;
 
@@ -109,10 +109,10 @@ pub struct Uhyve {
 }
 
 impl Uhyve {
-    pub fn new(path: &str, mem_size: u64, num_cpus: u32) -> Result<Uhyve> {
+    pub fn new(path: &str, mem_size: u64, num_cpus: u32, additional: IsleParameterUhyve) -> Result<Uhyve> {
         let kvm = KVM::new();
         let mut vm = kvm.create_vm(mem_size as usize, num_cpus)?;
-        vm.load_kernel(path)?;
+        vm.load_kernel(path, additional)?;
         vm.init()?;
     
         Ok(Uhyve {
