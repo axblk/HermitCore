@@ -12,7 +12,6 @@ use libc;
 use hermit::Isle;
 use super::{Error, Result, NameIOCTL};
 use super::vm::VirtualMachine;
-use hermit::socket::Console;
 
 use std::os::unix::net::UnixStream;
 
@@ -112,21 +111,18 @@ impl KVM {
 pub struct Uhyve {
     kvm: KVM,
     vm: VirtualMachine,
-    console: Console
 }
 
 impl Uhyve {
     pub fn new(path: &str, mem_size: u64, num_cpus: u32) -> Result<Uhyve> {
         let kvm = KVM::new();
         let mut vm = kvm.create_vm(mem_size as usize, num_cpus)?;
-        let console = vm.console();
         vm.load_kernel(path)?;
         vm.init()?;
     
         Ok(Uhyve {
             kvm: kvm,
             vm: vm,
-            console: console
         })
     }
 }
@@ -154,19 +150,5 @@ impl Isle for Uhyve {
 
     fn output(&self) -> Result<String> {
         self.vm.output()
-    }
-
-    fn stop(&mut self) -> Result<i32> {
-        self.vm.stop()
-    }
-
-    fn is_running(&mut self) -> Result<bool> {
-        self.vm.is_running()
-    }
-
-    fn add_endpoint(&mut self, stream: UnixStream) -> Result<()> {
-        self.console.lock().unwrap().push(stream);
-
-        Ok(())
     }
 }

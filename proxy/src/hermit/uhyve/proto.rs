@@ -4,7 +4,6 @@ use std::ffi::CStr;
 use std::slice;
 
 use super::{Error, Result};
-use hermit::socket::Console;
 
 const PORT_WRITE: u16 = 0x499;
 const PORT_OPEN: u16 = 0x500;
@@ -93,7 +92,7 @@ impl Syscall {
 
     }
 
-    pub unsafe fn run(&self, guest_mem: *mut u8, console: Console) -> Result<Return> {
+    pub unsafe fn run(&self, guest_mem: *mut u8) -> Result<Return> {
         match *self {
             Syscall::Write(obj) => {
                 (*obj).length = write((*obj).fd, guest_mem.offset((*obj).buf) as *const c_void, (*obj).length as usize);

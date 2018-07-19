@@ -84,28 +84,4 @@ impl Isle for Multi {
     fn output(&self) -> Result<String> {
         Ok("".into())
     }
-    fn stop(&mut self) -> Result<i32> {
-        debug!("Stop the HermitIsle");
-       
-        let cpu_path = match self.cpu_path() {
-            Some(f) => f,
-            None => return Ok(0)
-        };
-
-        let mut cpus_file = File::create(&cpu_path)
-            .map_err(|_| Error::InvalidFile(cpu_path.clone()))?;
-
-        cpus_file.write("-1".as_bytes())
-            .map_err(|_| Error::InvalidFile(cpu_path));
-    
-        Ok(0)
-    }
-
-    fn is_running(&mut self) -> Result<bool> {
-        Ok(true)
-    }
-
-    fn add_endpoint(&mut self, stream: UnixStream) -> Result<()> {
-        Ok(())
-    }
 }

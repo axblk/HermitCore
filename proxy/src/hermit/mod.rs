@@ -103,12 +103,7 @@ pub trait Isle {
 
     fn output(&self) -> Result<String>;
 
-    fn stop(&mut self) -> Result<i32>;
     fn run(&mut self) -> Result<()>;
-
-    fn is_running(&mut self) -> Result<bool>;
-
-    fn add_endpoint(&mut self, stream: UnixStream) -> Result<()>;
 
     fn is_available(&self) -> Result<bool> {
         let log = match self.log_file() {

@@ -18,18 +18,15 @@ use libc;
 
 const HERMIT_MAGIC: u32 = 0x7E317;
 
-pub type Console = Arc<Mutex<Vec<UnixStream>>>;
-
 #[derive(Debug)]
 pub struct Socket {
     stream: Option<TcpStream>, 
     port: u16,
-    console: Console
 }
 
 impl Socket {
     pub fn new(port: u16) -> Socket {
-        Socket { stream: None, port: port, console: Arc::new(Mutex::new(Vec::new())) }
+        Socket { stream: None, port: port }
     }
 
     pub fn connect(&mut self) -> Result<()> {
@@ -77,10 +74,6 @@ impl Socket {
         debug!("Transmitted environment and arguments with length {}", length);
 
         Ok(())
-    }
-
-    pub fn console(&self) -> Console {
-        self.console.clone()
     }
 
     pub fn stream(&self) -> Result<&TcpStream> {

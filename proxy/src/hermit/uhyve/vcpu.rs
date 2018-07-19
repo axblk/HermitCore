@@ -19,7 +19,6 @@ use super::kvm_header::{kvm_sregs, kvm_regs, kvm_segment, kvm_cpuid2,kvm_cpuid2_
 use super::{Result, Error, NameIOCTL};
 use super::gdt;
 use super::proto;
-use hermit::socket::Console;
 
 pub const GUEST_OFFSET: usize = 0x0;
 pub const CPUID_FUNC_PERFMON: usize = 0x0A;
@@ -56,7 +55,6 @@ pub struct SharedState {
     mboot:*mut u8,
     guest_mem: *mut u8,
     running_state: Arc<AtomicBool>,
-    console: Console
 }
 
 pub struct VirtualCPU {
@@ -68,7 +66,7 @@ pub struct VirtualCPU {
 }
 
 impl VirtualCPU {
-    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, entry: u64, mem: &mut Mmap, mboot: *mut u8, running_state: Arc<AtomicBool>, console: Console) -> Result<VirtualCPU> {
+    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, entry: u64, mem: &mut Mmap, mboot: *mut u8, running_state: Arc<AtomicBool>) -> Result<VirtualCPU> {
         
         // create a new VCPU and save the file descriptor
         let fd = VirtualCPU::create_vcpu(vm_fd, id as u32)?;
@@ -90,7 +88,6 @@ impl VirtualCPU {
             mboot: mboot,
             guest_mem: mem.mut_ptr(),
             running_state: running_state,
-            console: console
         };
 
         let cpu = VirtualCPU {
@@ -210,7 +207,7 @@ impl VirtualCPU {
         }
 
         unsafe {
-            let a = proto::Syscall::from_mem(state.run_mem.ptr(), state.guest_mem).run(state.guest_mem, state.console.clone());
+            let a = proto::Syscall::from_mem(state.run_mem.ptr(), state.guest_mem).run(state.guest_mem);
         
             a
         }

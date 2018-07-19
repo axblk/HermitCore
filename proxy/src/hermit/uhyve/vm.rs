@@ -18,7 +18,6 @@ use hermit::uhyve;
 use super::kvm_header::{kvm_userspace_memory_region, KVM_CAP_SYNC_MMU, KVM_32BIT_GAP_START, KVM_32BIT_GAP_SIZE, kvm_sregs};
 use super::{Result, Error, NameIOCTL};
 use super::vcpu::{ExitCode, VirtualCPU};
-use hermit::socket::Console;
 
 //use byteorder::ByteOrder;
 // guest offset?
@@ -35,8 +34,7 @@ pub struct VirtualMachine {
     num_cpus: u32,
     sregs: kvm_sregs,
     running_state: Arc<AtomicBool>,
-    thread_handles: Vec<JoinHandle<ExitCode>>,
-    console: Console
+    thread_handles: Vec<JoinHandle<ExitCode>>
 }
 
 impl VirtualMachine {
@@ -55,7 +53,7 @@ impl VirtualMachine {
             unsafe { libc::mprotect((mem.mut_ptr() as *mut libc::c_void).offset(KVM_32BIT_GAP_START as isize), KVM_32BIT_GAP_START, libc::PROT_NONE); }
         }
         
-        Ok(VirtualMachine { kvm_fd: kvm_fd, vm_fd: fd, mem: mem, elf_header: None, klog: None, vcpus: Vec::new(), mboot: None, num_cpus: num_cpus, sregs: kvm_sregs::default(), running_state: Arc::new(AtomicBool::new(false)), thread_handles: Vec::new(), console: Arc::new(Mutex::new(Vec::new())) })
+        Ok(VirtualMachine { kvm_fd: kvm_fd, vm_fd: fd, mem: mem, elf_header: None, klog: None, vcpus: Vec::new(), mboot: None, num_cpus: num_cpus, sregs: kvm_sregs::default(), running_state: Arc::new(AtomicBool::new(false)), thread_handles: Vec::new() })
     }
 
     /// Loads a kernel from path and initialite mem and elf_entry
@@ -202,7 +200,7 @@ impl VirtualMachine {
     pub fn create_vcpu(&mut self, id: u32) -> Result<()> {
         let entry = self.elf_header.ok_or(Error::KernelNotLoaded)?.entry;
 
-        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, entry, &mut self.mem,self.mboot.unwrap(), self.running_state.clone(), self.console.clone())?;
+        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, entry, &mut self.mem,self.mboot.unwrap(), self.running_state.clone())?;
 
         if id == 0 {
             self.sregs = cpu.init_sregs()?;
@@ -222,9 +220,6 @@ impl VirtualMachine {
         let c_str = unsafe { CStr::from_ptr(paddr).to_str().map_err(|_| Error::KernelNotLoaded)? };
         
         Ok(c_str.into())
-    }
-    pub fn console(&self) -> Console {
-        self.console.clone()
     }
 
     pub fn run(&mut self) -> Result<()> {

@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use hermit::{Isle, IsleParameterQEmu};
 use hermit::utils;
 use hermit::error::*;
-use hermit::socket::{Socket, Console};
+use hermit::socket::Socket;
 
 const PIDNAME: &'static str = "/tmp/hpid-XXXXXX";
 const TMPNAME: &'static str = "/tmp/hermit-XXXXXX";
@@ -47,7 +47,6 @@ pub struct QEmu {
     stderr: ChildStderr,
     tmp_file: String,
     pid_file: String,
-    console: Console
 }
 
 impl QEmu {
@@ -63,7 +62,6 @@ impl QEmu {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let socket = Socket::new(port);
-        let console = socket.console();
 
         Ok(QEmu {
             socket: Some(socket),
@@ -72,7 +70,6 @@ impl QEmu {
             stderr: stderr,
             tmp_file: tmpf,
             pid_file: pidf,
-            console: console
         })
     }
     
@@ -92,7 +89,7 @@ impl QEmu {
 */
         let exe: String = "/opt/hermit/bin/ldhermit.elf".into();
 
-        let mut port_str;
+        let port_str;
 
         let mut args: Vec<&str> = vec![
             "-daemonize",
@@ -151,36 +148,6 @@ impl QEmu {
 
         (stdout, stderr)
     }
-
-    pub fn send_cmd(&self, cmd: &str) -> Result<String> {
-        let file = format!("{}_monitor", self.pid_file);
-
-        let mut control = UnixStream::connect(&file)
-            .map_err(|_| Error::InvalidFile(file.clone()))?;
-
-        control.set_read_timeout(Some(Duration::new(0,500))).unwrap();
-        
-        control.write_all(cmd.as_bytes())
-            .map_err(|_| Error::InvalidFile(file.clone()))?;
-        
-        control.write_all("\n".as_bytes())
-            .map_err(|_| Error::InvalidFile(file))?;
-
-		let mut response = [0u8; 256];
-		let mut buf = Vec::new();
-		loop {
-		    if let Ok(nread) = control.read(&mut response) {
-		        buf.extend_from_slice(&response[..nread]);
-		    } else {
-		        break;
-		    }
-		}   
-		
-		let res = String::from_utf8(buf).unwrap();
-		let res: String = res.lines().filter(|x| !x.starts_with("QEMU") && !x.starts_with("(qemu)")).collect();
-
-        Ok(res)
-    }
 }
 
 impl Isle for QEmu {
@@ -211,24 +178,6 @@ impl Isle for QEmu {
         file.read_to_string(&mut content);
 
         Ok(content)
-    }
-
-    fn stop(&mut self) -> Result<i32> {
-        self.send_cmd("stop")?;
-
-        Ok(0)
-    }
-
-    fn is_running(&mut self) -> Result<bool> {
-        let state = self.send_cmd("info status")?;
-
-        Ok(state == "VM status: running")
-    }
-
-    fn add_endpoint(&mut self, stream: UnixStream) -> Result<()> { 
-        self.console.lock().unwrap().push(stream);
-
-        Ok(())
     }
 }
 
