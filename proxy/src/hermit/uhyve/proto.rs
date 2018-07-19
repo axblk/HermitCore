@@ -3,6 +3,8 @@ use super::kvm_header::{kvm_run, KVM_EXIT_IO, KVM_EXIT_HLT, KVM_EXIT_MMIO,KVM_EX
 use std::ffi::CString;
 use std::env;
 
+use hermit::is_verbose;
+
 use super::{Error, Result};
 
 const PORT_WRITE:   u16 = 0x400;
@@ -19,6 +21,8 @@ const PORT_NETSTAT:     u16 = 0x700;
 
 const PORT_CMDSIZE: u16 = 0x740;
 const PORT_CMDVAL:  u16 = 0x780;
+
+pub const PORT_UART:    u16 = 0x800;
 
 #[repr(C, packed)]
 pub struct Exit {
@@ -101,6 +105,7 @@ pub struct CmdVal {
 
 #[derive(Debug)]
 pub enum Syscall {
+    UART(u8),
     Write(*mut Write),
     Open(*mut Open),
     Close(*mut Close),
@@ -134,6 +139,7 @@ impl Syscall {
 
             let offset = *((mem.offset(run.__bindgen_anon_1.io.data_offset as isize) as *const isize));
             match run.__bindgen_anon_1.io.port {
+                PORT_UART       => { Syscall::UART(offset as u8) },
                 PORT_WRITE      => { Syscall::Write(guest_mem.offset(offset) as *mut Write) },
                 PORT_READ       => { Syscall::Read (guest_mem.offset(offset) as *mut Read)  },
                 PORT_CLOSE      => { Syscall::Close(guest_mem.offset(offset) as *mut Close) },
@@ -146,11 +152,17 @@ impl Syscall {
                 _ => { panic!("KVM: unhandled KVM_EXIT_IO at port {:#x}, direction {}", run.__bindgen_anon_1.io.port, run.__bindgen_anon_1.io.direction); }
             }
         }
-
     }
 
     pub unsafe fn run(&self, guest_mem: *mut u8) -> Result<Return> {
         match *self {
+            Syscall::UART(obj) => {
+                if is_verbose() {
+                    use std::io::{self, Write};
+                    let buf = [obj];
+                    io::stderr().write(&buf);
+                }
+            },
             Syscall::Write(obj) => {
                 (*obj).length = write((*obj).fd, guest_mem.offset((*obj).buf) as *const c_void, (*obj).length) as usize;
             },

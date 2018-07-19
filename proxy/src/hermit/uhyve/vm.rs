@@ -12,11 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use hermit::is_verbose;
 use hermit::utils;
 use hermit::uhyve;
 use super::kvm_header::{kvm_userspace_memory_region, KVM_CAP_SYNC_MMU, KVM_32BIT_GAP_START, KVM_32BIT_GAP_SIZE, kvm_sregs};
 use super::{Result, Error, NameIOCTL};
 use super::vcpu::{ExitCode, VirtualCPU};
+use super::proto::PORT_UART;
 
 //use byteorder::ByteOrder;
 // guest offset?
@@ -102,7 +104,7 @@ impl VirtualMachine {
             }
 
             let ptr = vm_mem[vm_start..vm_end].as_mut_ptr();
-           
+
             unsafe {
                 *(ptr.offset(0x08) as *mut u64) = header.paddr;   // physical start addr
                 *(ptr.offset(0x10) as *mut u64) = vm_mem_length;  // physical size limit
@@ -112,7 +114,10 @@ impl VirtualMachine {
                 *(ptr.offset(0x38) as *mut u64) = header.memsz;  // 
                 *(ptr.offset(0x60) as *mut u32) = 1;              // NUMA nodes
                 *(ptr.offset(0x94) as *mut u32) = 1;              // announce uhyve
-            
+                if is_verbose() {
+                    *(ptr.offset(0x98) as *mut u64) = PORT_UART as u64;              // announce uhyve
+                }
+
                 self.klog = Some(vm_mem.as_ptr().offset(header.paddr as isize + 0x5000) as *const i8);
                 self.mboot = Some(vm_mem.as_mut_ptr().offset(header.paddr as isize) as *mut u8);
             }
