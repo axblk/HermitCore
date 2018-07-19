@@ -14,6 +14,7 @@ use std::env;
 use std::net::Ipv4Addr;
 
 use hermit::error::*;
+use hermit::uhyve::migration::MigrationType;
 
 const BASE_PORT: u16 = 18766;
 
@@ -40,6 +41,11 @@ pub struct IsleParameterUhyve {
     ip: Option<Ipv4Addr>,
     gateway: Option<Ipv4Addr>,
     mask: Option<Ipv4Addr>,
+    checkpoint: u32,
+    full_Checkpoint: bool,
+    migration_support: Option<Ipv4Addr>,
+    migration_type: Option<MigrationType>,
+    migration_server: bool
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +66,14 @@ pub enum IsleParameter {
 }
 
 impl IsleParameter {
+    pub fn parse_bool(name: &str, default: bool) -> bool {
+        env::var(name).map(|x| x.parse::<i32>().unwrap_or(default as i32) != 0).unwrap_or(default)
+    }
+
+    fn parse_ip(name: &str) -> Option<Ipv4Addr> {
+        env::var(name).map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None)
+    }
+
     pub fn from_env() -> IsleParameter {
         let isle_kind = env::var("HERMIT_ISLE").unwrap_or("qemu".into());
         let mem_size: u64 = env::var("HERMIT_MEM").map(|x| utils::parse_mem(&x).unwrap_or(512*1024*1024)).unwrap_or(512*1024*1024);
@@ -73,9 +87,14 @@ impl IsleParameter {
             },
             "uhyve" | "UHyve" | "UHYVE" => {
                 let netif = env::var("HERMIT_NETIF").map(|x| Some(x)).unwrap_or(None);
-                let ip: Option<Ipv4Addr> = env::var("HERMIT_IP").map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None);
-                let gateway: Option<Ipv4Addr> = env::var("HERMIT_GATEWAY").map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None);
-                let mask: Option<Ipv4Addr> = env::var("HERMIT_MASK").map(|x| x.parse().map(|n| Some(n)).unwrap_or(None)).unwrap_or(None);
+                let ip = IsleParameter::parse_ip("HERMIT_IP");
+                let gateway = IsleParameter::parse_ip("HERMIT_GATEWAY");
+                let mask = IsleParameter::parse_ip("HERMIT_MASK");
+                let checkpoint = env::var("HERMIT_CHECKPOINT").map(|x| x.parse().unwrap_or(0)).unwrap_or(0);
+                let full_Checkpoint = IsleParameter::parse_bool("HERMIT_FULLCHECKPOINT", false);
+                let migration_support = IsleParameter::parse_ip("HERMIT_MIGRATION_SUPPORT");
+                let migration_type = env::var("HERMIT_MIGRATION_TYPE").map(|x| x.parse::<MigrationType>().map(|x| Some(x)).unwrap_or(None)).unwrap_or(None);
+                let migration_server = IsleParameter::parse_bool("HERMIT_MIGRATION_SERVER", false);
 
                 IsleParameter::UHyve {
                     mem_size: mem_size,
@@ -84,18 +103,23 @@ impl IsleParameter {
                         netif: netif,
                         ip: ip,
                         gateway: gateway,
-                        mask: mask
+                        mask: mask,
+                        checkpoint: checkpoint,
+                        full_Checkpoint: full_Checkpoint,
+                        migration_support: migration_support,
+                        migration_type: migration_type,
+                        migration_server: migration_server
                     }
                 }
             },
             _ => {
                 let binary = env::var("HERMIT_QEMU").unwrap_or("qemu-system-x86_64".into());
-                let kvm = env::var("HERMIT_KVM").map(|x| x.parse::<i32>().unwrap_or(1) != 0).unwrap_or(true);
-                let monitor = env::var("HERMIT_MONITOR").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
-                let capture_net = env::var("HERMIT_CAPTURE_NET").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
+                let kvm = IsleParameter::parse_bool("HERMIT_KVM", true);
+                let monitor = IsleParameter::parse_bool("HERMIT_MONITOR", false);
+                let capture_net = IsleParameter::parse_bool("HERMIT_CAPTURE_NET", false);
                 let port = env::var("HERMIT_PORT").map(|x| x.parse().unwrap_or(0)).unwrap_or(0);
                 let app_port = env::var("HERMIT_APP_PORT").map(|x| x.parse().unwrap_or(0)).unwrap_or(0);
-                let debug = env::var("HERMIT_DEBUG").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
+                let debug = IsleParameter::parse_bool("HERMIT_DEBUG", false);
 
                 IsleParameter::QEmu {
                     mem_size: mem_size,

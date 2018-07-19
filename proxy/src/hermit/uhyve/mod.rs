@@ -5,6 +5,7 @@ pub mod uhyve;
 pub mod vcpu;
 pub mod vm;
 pub mod proto;
+pub mod migration;
 
 // reexport Uhyve to show up in the root namespace of our module
 pub use self::uhyve::*;

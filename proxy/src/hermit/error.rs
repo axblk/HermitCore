@@ -20,6 +20,7 @@ pub enum Error {
     ProxyConnect,
     ProxyPacket,
     InotifyError,
+    UnsupportedMigrationType(String)
 }
 
 impl fmt::Display for Error {
@@ -39,7 +40,8 @@ impl fmt::Display for Error {
             Error::ParseMemory => write!(f, "Couldn't parse the guest memory size from the environment"),
             Error::ProxyConnect => write!(f, "Proxy: connection error"),
             Error::ProxyPacket => write!(f, "Could not read proxy packet"),
-            Error::InotifyError => write!(f, "Inotify error")
+            Error::InotifyError => write!(f, "Inotify error"),
+            Error::UnsupportedMigrationType(ref name) => write!(f, "Migration type '{}' not supported.", name)
         }
     }
 }

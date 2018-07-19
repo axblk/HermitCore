@@ -47,7 +47,7 @@ fn create_isle(path: &str, specs: IsleParameter) -> Result<()> {
 
 fn main() {
     env_logger::init();
-    let verbose = env::var("HERMIT_VERBOSE").map(|x| x.parse::<i32>().unwrap_or(0) != 0).unwrap_or(false);
+    let verbose = IsleParameter::parse_bool("HERMIT_VERBOSE", false);
     unsafe { hermit::verbose = verbose; }
 
     let args: Vec<String> = env::args().collect();
