@@ -3,6 +3,7 @@ use libc;
 use std::fs::File;
 use std::io::Read;
 use std::process::{ChildStdout, ChildStderr};
+use nix::sys::signal::{kill, SIGINT};
 
 use hermit::{Isle, IsleParameterQEmu};
 use hermit::utils;
@@ -184,7 +185,7 @@ impl Drop for QEmu {
         let id = id_str.parse::<i32>().unwrap();
 
         if id >= 0 {
-            unsafe { libc::kill(id, libc::SIGINT); }
+            kill(id, SIGINT);
         }
 
         utils::delete_tmp_file(&self.pid_file);

@@ -2,9 +2,9 @@ use std::fs::File;
 use std::ffi::CString;
 use std::io::Read;
 
-use hermit::error::*;
+use nix::unistd::{mkstemp, unlink};
 
-use libc;
+use hermit::error::*;
 
 /// Returns the CPU frequency
 pub fn cpufreq() -> Result<u32> {
@@ -49,35 +49,23 @@ pub fn parse_mem(mem: &str) -> Result<u64> {
 
 /// Creates a temporary file /tmp/<name>-XXXX, the X will be replaced by an arbitrary sequence
 pub fn create_tmp_file(name: &str) -> Result<String> {
-    unsafe {
-        let c_str = CString::new(name).unwrap();
-        let raw = c_str.into_raw();
-        let res = libc::mkstemp(raw);
-
-        if res < 0 {
-            return Err(Error::CannotCreateTmpFile(res as usize));
-        }
-
-        let new_name = CString::from_raw(raw).into_string().unwrap();
-        
-        debug!("Created tmp file with name {}", new_name);
-        
-        Ok(new_name)
+    match mkstemp(name) {
+        Ok((_, path)) => {
+            let new_name = path.to_str().unwrap();
+            debug!("Created tmp file with name {}", new_name);
+            Ok(new_name.to_string())
+        },
+        Err(_) => Err(Error::CannotCreateTmpFile())
     }
 }
 
 /// Deletes a temporary file 
 pub fn delete_tmp_file(name: &str) -> Result<()> {
-    unsafe {
-        let c_str = CString::new(name).unwrap();
-        let res = libc::unlink(c_str.into_raw());
-
-        debug!("Deleted tmp file {}", name);
-
-        if res < 0 {
-            return Err(Error::InvalidFile(name.into()));
-        } else {
-            return Ok(());
-        }
+    match unlink(name) {
+        Ok(_) => {
+            debug!("Deleted tmp file {}", name);
+            Ok(())
+        },
+        Err(_) => Err(Error::InvalidFile(name.into()))
     }
 }
