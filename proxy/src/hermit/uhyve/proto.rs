@@ -1,6 +1,6 @@
-use libc::{write, read, lseek, open, close, c_int, c_void, c_char};
+use libc::{write, read, lseek, open, close, strcpy, c_void, c_char};
 use super::kvm_header::{kvm_run, KVM_EXIT_IO, KVM_EXIT_HLT, KVM_EXIT_MMIO,KVM_EXIT_FAIL_ENTRY, KVM_EXIT_INTERNAL_ERROR, KVM_EXIT_SHUTDOWN }; 
-use std::ffi::CStr;
+use std::ffi::CString;
 use std::env;
 
 use super::{Error, Result};
@@ -20,14 +20,19 @@ const PORT_NETSTAT:     u16 = 0x700;
 const PORT_CMDSIZE: u16 = 0x740;
 const PORT_CMDVAL:  u16 = 0x780;
 
-#[repr(packed)]
+#[repr(C, packed)]
+pub struct Exit {
+    arg: i32
+}
+
+#[repr(C, packed)]
 pub struct Write {
     fd: i32,
     buf: isize,
-    length: isize
+    length: usize
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct Open {
     name: isize,
     flags: i32,
@@ -35,13 +40,13 @@ pub struct Open {
     ret: i32
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct Close {
     fd: i32,
     ret: i32
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct Read {
     fd: i32,
     buf: isize,
@@ -49,38 +54,38 @@ pub struct Read {
     ret: isize
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct LSeek {
     fd: i32,
-    whence: i32,
     offset: i64,
+    whence: i32,
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct NetInfo {
 	mac_str: [u8; 18]
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct NetWrite {
 	data: isize,
 	len: usize,
-	ret: isize
+	ret: i32
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct NetRead {
 	data: isize,
 	len: usize,
-	ret: isize
+	ret: i32
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct NetStat {
     status: i32
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct CmdSize {
 	argc: i32,
 	argsz: [i32; 128],
@@ -88,7 +93,7 @@ pub struct CmdSize {
 	envsz: [i32; 128],
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct CmdVal {
 	argv: isize,
 	envp: isize
@@ -101,7 +106,7 @@ pub enum Syscall {
     Close(*mut Close),
     Read(*mut Read),
     LSeek(*mut LSeek),
-    Exit(*mut i32),
+    Exit(*mut Exit),
     NetStat(*mut NetStat),
     CmdSize(*mut CmdSize),
     CmdVal(*mut CmdVal),
@@ -134,7 +139,7 @@ impl Syscall {
                 PORT_CLOSE      => { Syscall::Close(guest_mem.offset(offset) as *mut Close) },
                 PORT_OPEN       => { Syscall::Open (guest_mem.offset(offset) as *mut Open ) },
                 PORT_LSEEK      => { Syscall::LSeek(guest_mem.offset(offset) as *mut LSeek) },
-                PORT_EXIT       => { Syscall::Exit (guest_mem.offset(offset) as *mut i32) },
+                PORT_EXIT       => { Syscall::Exit (guest_mem.offset(offset) as *mut Exit) },
                 PORT_NETSTAT    => { Syscall::NetStat(guest_mem.offset(offset) as *mut NetStat) },
                 PORT_CMDSIZE    => { Syscall::CmdSize(guest_mem.offset(offset) as *mut CmdSize) },
                 PORT_CMDVAL     => { Syscall::CmdVal(guest_mem.offset(offset) as *mut CmdVal) },
@@ -147,13 +152,13 @@ impl Syscall {
     pub unsafe fn run(&self, guest_mem: *mut u8) -> Result<Return> {
         match *self {
             Syscall::Write(obj) => {
-                (*obj).length = write((*obj).fd, guest_mem.offset((*obj).buf) as *const c_void, (*obj).length as usize);
+                (*obj).length = write((*obj).fd, guest_mem.offset((*obj).buf) as *const c_void, (*obj).length) as usize;
             },
             Syscall::Read(obj) => {
                 (*obj).ret = read((*obj).fd, guest_mem.offset((*obj).buf) as *mut c_void, (*obj).len);
             },
             Syscall::Exit(obj) => {
-                return Ok(Return::Exit(*(guest_mem.offset((*obj) as isize)) as i32));
+                return Ok(Return::Exit(*(guest_mem.offset((*obj).arg as isize)) as i32));
             },
             Syscall::Open(obj) => {
                 // TODO: protect kvm device
@@ -166,7 +171,7 @@ impl Syscall {
                 }
             },
             Syscall::LSeek(obj) => {
-                (*obj).offset = lseek((*obj).fd, (*obj).offset as i64, (*obj).whence);
+                (*obj).offset = lseek((*obj).fd, (*obj).offset, (*obj).whence);
             },
             Syscall::NetStat(obj) => {
                 // TODO
@@ -177,6 +182,7 @@ impl Syscall {
                 let mut count = 0;
                 for key in env::args().skip(1) {
                     (*obj).argsz[count] = key.len() as i32 + 1;
+                    count += 1;
                 }
 
                 (*obj).envc = env::vars().count() as i32;
@@ -184,12 +190,26 @@ impl Syscall {
                 for (val,key) in env::vars() {
                     let tmp = format!("{}={}", val, key);
                     (*obj).envsz[count] = tmp.len() as i32;
+                    count += 1;
                 }
             },
             Syscall::CmdVal(obj) => {
-                //let argv = guest_mem.offset((*obj).argv) as *const *const c_char;
-                //let envp = guest_mem.offset((*obj).envp) as *const *const c_char;
-                println!("missing!!!");
+                let argv_ptr = guest_mem.offset((*obj).argv) as *const isize;
+                let envp_ptr = guest_mem.offset((*obj).envp) as *const isize;
+
+                let mut count = 0;
+                for key in env::args().skip(1) {
+                    let c_str = CString::new(key).unwrap();
+                    strcpy(guest_mem.offset(*argv_ptr.offset(count)) as *mut c_char, c_str.as_ptr());
+                    count += 1;
+                }
+                
+                count = 0;
+                for (val,key) in env::vars() {
+                    let c_str = CString::new(format!("{}={}", val, key)).unwrap();
+                    strcpy(guest_mem.offset(*envp_ptr.offset(count)) as *mut c_char, c_str.as_ptr());
+                    count += 1;
+                }
             },
             Syscall::Other(id) => {
                 let err = match (*id).exit_reason {
