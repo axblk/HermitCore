@@ -1,6 +1,6 @@
 use std::process::{Stdio, Child, Command};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, BufReader, BufRead};
 use std::process::{ChildStdout, ChildStderr};
 use std::env;
 use nix::sys::signal::{kill, SIGINT};
@@ -9,6 +9,7 @@ use hermit::{Isle, IsleParameterQEmu};
 use hermit::utils;
 use hermit::error::*;
 use hermit::socket::Socket;
+use hermit::is_verbose;
 
 const PIDNAME: &'static str = "/tmp/hpid-XXXXXX";
 const TMPNAME: &'static str = "/tmp/hermit-XXXXXX";
@@ -168,6 +169,19 @@ impl Drop for QEmu {
 
         if id >= 0 {
             kill(id, SIGINT);
+        }
+
+        if is_verbose() {
+            match File::open(&self.tmp_file) {
+                Ok(file) => {
+                    println!("Dump kernel log:");
+                    println!("================");
+                    for line in BufReader::new(file).lines() {
+                        println!("{}", line.unwrap());
+                    }
+                },
+                Err(_) => debug!("Could not read kernel log")
+            };
         }
 
         utils::delete_tmp_file(&self.pid_file);

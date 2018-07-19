@@ -14,6 +14,12 @@ use std::env;
 
 use hermit::error::*;
 
+pub static mut verbose: bool = false;
+
+pub fn is_verbose() -> bool {
+    return unsafe { verbose };
+}
+
 #[derive(Debug, Clone)]
 pub struct IsleParameterQEmu {
     binary: String,
