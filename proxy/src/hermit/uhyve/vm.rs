@@ -228,8 +228,14 @@ impl VirtualMachine {
         unsafe { *(self.mboot.unwrap().offset(0x24) as *mut u32) = self.num_cpus; }
         self.running_state.store(true, Ordering::Relaxed);
 
+        let mut count = 1;
         for vcpu in &self.vcpus {
-            self.thread_handles.push(vcpu.run());
+            if count == self.vcpus.len() {
+                vcpu.run();
+            } else {
+                self.thread_handles.push(vcpu.run_threaded());
+            }
+            count += 1;
         }
 
         Ok(())

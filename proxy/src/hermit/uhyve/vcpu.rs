@@ -230,42 +230,52 @@ impl VirtualCPU {
         }
     }
 
-    pub fn run(&self) -> JoinHandle<ExitCode> {
+    pub fn run_vcpu(state: Arc<SharedState>, id: u32, fd: i32) -> ExitCode {
+        unsafe {
+            while volatile_load(state.mboot.offset(0x20)) < id as u8 {
+                thread::yield_now();
+            }
+
+            volatile_store(state.mboot.offset(0x30), id as u8);
+        }
+
+        while state.running_state.load(Ordering::Relaxed) {
+            match VirtualCPU::single_run(fd, &state) {
+                Ok(proto::Return::Exit(code)) => {
+                    state.running_state.store(false, Ordering::Relaxed);
+
+                    return ExitCode::Cause(Ok(code));
+                },
+                Err(err) => {
+                    state.running_state.store(false, Ordering::Relaxed);
+                    
+                    return ExitCode::Cause(Err(err));
+                },
+                _ => {}
+            }
+        }
+
+        ExitCode::Innocent
+    }
+
+    pub fn run_threaded(&self) -> JoinHandle<ExitCode> {
+        debug!("Run CPU {} threaded", self.id);
+
+        let state = self.state.clone();
+        let id = self.id;
+        let fd = self.vcpu_fd;
+
+        thread::spawn(move || VirtualCPU::run_vcpu(state, id, fd))
+    }
+
+    pub fn run(&self) -> ExitCode {
         debug!("Run CPU {}", self.id);
 
         let state = self.state.clone();
         let id = self.id;
         let fd = self.vcpu_fd;
 
-        let child = thread::spawn(move || { 
-            unsafe {
-                while volatile_load(state.mboot.offset(0x20)) < id as u8 {
-                    thread::yield_now();
-                }
-
-                volatile_store(state.mboot.offset(0x30), id as u8);
-            }
-
-            while state.running_state.load(Ordering::Relaxed) {
-                match VirtualCPU::single_run(fd, &state) {
-                    Ok(proto::Return::Exit(code)) => {
-                        state.running_state.store(false, Ordering::Relaxed);
-
-                        return ExitCode::Cause(Ok(code));
-                    },
-                    Err(err) => {
-                        state.running_state.store(false, Ordering::Relaxed);
-                        
-                        return ExitCode::Cause(Err(err));
-                    },
-                    _ => {}
-                }
-            }
-
-            ExitCode::Innocent
-        });
-    
-        child
+        VirtualCPU::run_vcpu(state, id, fd)
     }
     
     pub fn init_sregs(&self) -> Result<kvm_sregs> {
