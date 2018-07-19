@@ -32,9 +32,9 @@ impl fmt::Debug for Error {
 
                 write!(f, "The IOCTL command {:?} has failed: {}", name, e)
             },
-            Error::KernelNotLoaded => write!(f, "Please load the kernel before your start the virtual machine."),
-            Error::MissingFrequency => write!(f, "Couldn't get the CPU frequency from you system. (is /proc/cpuinfo missing?)"),
-            Error::MultiIsleFailed => write!(f, "The Multi isle was selected on a system without supported, please load the kernel driver."),
+            Error::KernelNotLoaded => write!(f, "Please load the kernel before you start the virtual machine."),
+            Error::MissingFrequency => write!(f, "Couldn't get the CPU frequency from your system. (is /proc/cpuinfo missing?)"),
+            Error::MultiIsleFailed => write!(f, "The Multi isle was selected on a system without support, please load the kernel driver."),
             Error::CannotCreateTmpFile(_) => write!(f, "Couldn't create a tmp file in /tmp."),
             Error::QEmu((_, ref stderr)) => write!(f, "The qemu binary has encountered an error: {}", stderr),
             Error::MissingBinary => write!(f, "Please specify a binary."),
