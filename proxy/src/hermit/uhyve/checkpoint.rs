@@ -24,11 +24,11 @@ pub struct vcpu_state {
 #[repr(C)]
 #[derive(Default)]
 pub struct CheckpointConfig {
-    num_cpus: u32,
-    mem_size: isize,
-    checkpoint_number: u32,
-    elf_entry: u64,
-    full: bool
+    pub num_cpus: u32,
+    pub mem_size: isize,
+    pub checkpoint_number: u32,
+    pub elf_entry: u64,
+    pub full: bool
 }
 
 #[derive(Default)]
@@ -118,7 +118,7 @@ impl FileCheckpoint {
             let mut reader = BufReader::new(file);
             
             let mut cpu_state = vcpu_state::default();
-            reader.read_exact(unsafe { utils::any_as_u8_slice(&mut cpu_state) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+            reader.read_exact(unsafe { utils::any_as_u8_mut_slice(&mut cpu_state) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
             self.data.cpu_states.push(cpu_state);
         }
         Ok(())

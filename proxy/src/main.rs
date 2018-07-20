@@ -13,6 +13,9 @@ extern crate errno;
 extern crate inotify;
 extern crate byteorder;
 extern crate raw_cpuid;
+
+#[macro_use]
+extern crate chan;
 extern crate chan_signal;
 
 #[macro_use]

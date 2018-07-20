@@ -8,8 +8,7 @@ use std::intrinsics::{volatile_load,volatile_store};
 use std::thread;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
+use std::sync::atomic::Ordering;
 
 use nix::sys::signal;
 use nix::sys::pthread;
@@ -24,7 +23,7 @@ use super::{Result, Error, NameIOCTL};
 use super::gdt;
 use super::proto;
 use super::checkpoint::vcpu_state;
-use super::vm::KVMExtensions;
+use super::vm::{KVMExtensions, ControlData};
 use super::utils;
 
 pub const GUEST_OFFSET: usize = 0x0;
@@ -115,7 +114,7 @@ pub struct SharedState {
     run_mem: MmapMut,
     mboot: *mut u8,
     guest_mem: *mut u8,
-    running_state: Arc<AtomicBool>,
+    control: Arc<ControlData>,
 }
 
 pub struct VirtualCPU {
@@ -149,7 +148,7 @@ pub struct kvm_signal_mask_data {
 extern "C" fn empty_handler(_: libc::c_int) {}
 
 impl VirtualCPU {
-    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, mem: &mut MmapMut, mboot: *mut u8, running_state: Arc<AtomicBool>, extensions: KVMExtensions) -> Result<VirtualCPU> {
+    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, mem: &mut MmapMut, mboot: *mut u8, control: Arc<ControlData>, extensions: KVMExtensions) -> Result<VirtualCPU> {
 
         // create a new VCPU and save the file descriptor
         let fd = VirtualCPU::create_vcpu(vm_fd, id as i32)?;
@@ -173,7 +172,7 @@ impl VirtualCPU {
             run_mem: run_mem,
             mboot: mboot,
             guest_mem: mem.as_mut_ptr(),
-            running_state: running_state,
+            control: control,
         };
 
         let cpu = VirtualCPU {
@@ -512,7 +511,7 @@ impl VirtualCPU {
         if let Err(e) = ret {
             return match e {
                 nix::Error::Sys(errno) => match errno {
-                    Errno::EINTR => Ok(proto::Return::Continue),
+                    Errno::EINTR => Ok(proto::Return::Interrupt),
                     Errno::EFAULT => {
                         let regs = VirtualCPU::get_regs_fd(fd)?;
                         Err(Error::TranslationFault(regs.rip))
@@ -561,15 +560,21 @@ impl VirtualCPU {
         );
         unsafe { let _ = signal::sigaction(signal::Signal::SIGUSR2, &sigaction); }
 
-        while state.running_state.load(Ordering::Relaxed) {
+        while state.control.running.load(Ordering::Relaxed) {
             match VirtualCPU::single_run(fd, id, &state) {
+                Ok(proto::Return::Interrupt) => {
+                    if state.control.interrupt.load(Ordering::Relaxed) {
+                        state.control.barrier.wait();
+                        state.control.barrier.wait();
+                    }
+                },
                 Ok(proto::Return::Exit(code)) => {
-                    state.running_state.store(false, Ordering::Relaxed);
+                    state.control.running.store(false, Ordering::Relaxed);
 
                     return ExitCode::Cause(Ok(code));
                 },
                 Err(err) => {
-                    state.running_state.store(false, Ordering::Relaxed);
+                    state.control.running.store(false, Ordering::Relaxed);
                     
                     return ExitCode::Cause(Err(err));
                 },
@@ -580,31 +585,24 @@ impl VirtualCPU {
         ExitCode::Innocent
     }
 
-    pub fn run_threaded(&self) -> (JoinHandle<ExitCode>, pthread::Pthread) {
-        debug!("Run CPU {} threaded", self.id);
-
-        let state = self.state.clone();
-        let id = self.id;
-        let fd = self.vcpu_fd;
-
-        let (sender, receiver) = channel();
-
-        let handle = thread::spawn(move || {
-            let _ = sender.send(pthread::pthread_self());
-            VirtualCPU::run_vcpu(state, id, fd)
-        });
-
-        (handle, receiver.recv().unwrap())
-    }
-
-    pub fn run(&self) -> ExitCode {
+    pub fn run(&self) -> (JoinHandle<ExitCode>, pthread::Pthread, ::chan::Receiver<()>) {
         debug!("Run CPU {}", self.id);
 
         let state = self.state.clone();
         let id = self.id;
         let fd = self.vcpu_fd;
 
-        VirtualCPU::run_vcpu(state, id, fd)
+        let (spthread, rpthread) = ::chan::sync(0);
+        let (sdone, rdone) = ::chan::sync(1);
+
+        let handle = thread::spawn(move || {
+            let _ = spthread.send(pthread::pthread_self());
+            let ret = VirtualCPU::run_vcpu(state, id, fd);
+            sdone.send(());
+            ret
+        });
+
+        (handle, rpthread.recv().unwrap(), rdone)
     }
     
     pub fn init_sregs(&self) -> Result<kvm_sregs> {

@@ -8,8 +8,7 @@ use elf::types::{ELFCLASS64, OSABI, PT_LOAD, ET_EXEC, EM_X86_64};
 use std::io::Cursor;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
+use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 use std::ptr;
 use std::fs::File;
@@ -28,7 +27,7 @@ use super::{Result, Error, NameIOCTL};
 use super::vcpu::{ExitCode, VirtualCPU};
 use super::proto::PORT_UART;
 use super::checkpoint::{CheckpointConfig, vcpu_state};
-use super::migration::MigrationServer;
+use super::migration::{MigrationServer, MigrationClient};
 
 pub const KVM_32BIT_MAX_MEM_SIZE:   usize = 1 << 32;
 pub const KVM_32BIT_GAP_SIZE:       usize = 768 << 20;
@@ -87,6 +86,12 @@ pub struct KVMExtensions {
 	pub cap_vapic: bool,
 }
 
+pub struct ControlData {
+    pub running: AtomicBool,
+    pub interrupt: AtomicBool,
+    pub barrier: Barrier
+}
+
 pub struct VirtualMachine {
     kvm_fd: libc::c_int,
     vm_fd: libc::c_int,
@@ -97,9 +102,11 @@ pub struct VirtualMachine {
     vcpus: Vec<VirtualCPU>,
     num_cpus: u32,
     sregs: kvm_sregs,
-    running_state: Arc<AtomicBool>,
+    control: Arc<ControlData>,
     thread_handles: Vec<JoinHandle<ExitCode>>,
-    extensions: KVMExtensions
+    extensions: KVMExtensions,
+    additional: IsleParameterUhyve,
+    checkpoint_num: u32
 }
 
 fn determine_dest_offset(src_addr: isize) -> isize {
@@ -108,7 +115,7 @@ fn determine_dest_offset(src_addr: isize) -> isize {
 }
 
 impl VirtualMachine {
-    pub fn new(kvm_fd: libc::c_int, fd: libc::c_int, size: usize, num_cpus: u32) -> Result<VirtualMachine> {
+    pub fn new(kvm_fd: libc::c_int, fd: libc::c_int, size: usize, num_cpus: u32, add: IsleParameterUhyve) -> Result<VirtualMachine> {
         debug!("New virtual machine with memory size {}", size);
 
         // create a new memory region to map the memory of our guest
@@ -122,6 +129,12 @@ impl VirtualMachine {
             
             unsafe { libc::mprotect((mem.as_mut_ptr() as *mut libc::c_void).offset(KVM_32BIT_GAP_START as isize), KVM_32BIT_GAP_START, libc::PROT_NONE); }
         }
+
+        let control = ControlData {
+            running: AtomicBool::new(false),
+            interrupt: AtomicBool::new(false),
+            barrier: Barrier::new(num_cpus as usize + 1)
+        };
         
         Ok(VirtualMachine {
             kvm_fd: kvm_fd,
@@ -133,14 +146,16 @@ impl VirtualMachine {
             mboot: None,
             num_cpus: num_cpus,
             sregs: kvm_sregs::default(),
-            running_state: Arc::new(AtomicBool::new(false)),
+            control: Arc::new(control),
             thread_handles: Vec::new(),
-            extensions: KVMExtensions::default()
+            extensions: KVMExtensions::default(),
+            additional: add,
+            checkpoint_num: 0
         })
     }
 
     /// Loads a kernel from path and initialite mem and elf_entry
-    pub fn load_kernel(&mut self, path: &str, add: IsleParameterUhyve) -> Result<()> {
+    pub fn load_kernel(&mut self, path: &str) -> Result<()> {
         debug!("Load kernel from {}", path);
 
         // open the file in read only
@@ -214,7 +229,7 @@ impl VirtualMachine {
                     *(ptr.offset(0x98) as *mut u64) = PORT_UART as u64;              // announce uhyve
                 }
 
-                if let Some(ip) = add.ip {
+                if let Some(ip) = self.additional.ip {
                     let data = ip.octets();
                     *(ptr.offset(0xB0) as *mut u8) = data[0];
                     *(ptr.offset(0xB1) as *mut u8) = data[1];
@@ -222,7 +237,7 @@ impl VirtualMachine {
                     *(ptr.offset(0xB3) as *mut u8) = data[3];
                 }
 
-                if let Some(gateway) = add.gateway {
+                if let Some(gateway) = self.additional.gateway {
                     let data = gateway.octets();
                     *(ptr.offset(0xB4) as *mut u8) = data[0];
                     *(ptr.offset(0xB5) as *mut u8) = data[1];
@@ -230,7 +245,7 @@ impl VirtualMachine {
                     *(ptr.offset(0xB7) as *mut u8) = data[3];
                 }
 
-                if let Some(mask) = add.mask {
+                if let Some(mask) = self.additional.mask {
                     let data = mask.octets();
                     *(ptr.offset(0xB8) as *mut u8) = data[0];
                     *(ptr.offset(0xB9) as *mut u8) = data[1];
@@ -265,7 +280,7 @@ impl VirtualMachine {
             let mut reader = BufReader::new(file);
             
             let mut clock = kvm_clock_data::default();
-            reader.read_exact(unsafe { utils::any_as_u8_slice(&mut clock) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+            reader.read_exact(unsafe { utils::any_as_u8_mut_slice(&mut clock) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
 
             if self.extensions.cap_adjust_clock_stable && i == chk_num {
                 let mut data = kvm_clock_data::default();
@@ -282,6 +297,8 @@ impl VirtualMachine {
                 reader.read_exact(dest).map_err(|_| Error::InvalidFile(file_name.clone()))?;
             }
         }
+
+        self.checkpoint_num = chk.get_checkpoint_number() + 1;
 
         debug!("Loaded checkpoint {}", chk_num);
 
@@ -303,7 +320,7 @@ impl VirtualMachine {
 
         if self.extensions.cap_adjust_clock_stable {
             let mut clock = kvm_clock_data::default();
-            mig.recv_data(unsafe { utils::any_as_u8_slice(&mut clock) })?;
+            mig.recv_data(unsafe { utils::any_as_u8_mut_slice(&mut clock) })?;
 
             let mut data = kvm_clock_data::default();
             data.clock = clock.clock;
@@ -492,6 +509,15 @@ impl VirtualMachine {
         Ok(())
     }
 
+    fn get_clock(&self, clock: &mut kvm_clock_data) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::get_clock(self.vm_fd, clock as *mut kvm_clock_data)
+                .map_err(|_| Error::IOCTL(NameIOCTL::GetClock))?;
+        }
+
+        Ok(())
+    }
+
     pub fn set_clock(&self, mut clock: kvm_clock_data) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_clock(self.vm_fd, (&mut clock) as *mut kvm_clock_data)
@@ -502,7 +528,7 @@ impl VirtualMachine {
     }
 
     pub fn create_vcpu(&mut self, id: u32) -> Result<()> {
-        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, &mut self.mem, self.mboot.unwrap(), self.running_state.clone(), self.extensions.clone())?;
+        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, &mut self.mem, self.mboot.unwrap(), self.control.clone(), self.extensions.clone())?;
         self.vcpus.insert(id as usize, cpu);
 
         Ok(())
@@ -519,49 +545,105 @@ impl VirtualMachine {
 
     }
 
+    pub fn handle_checkpoint(&self, threads: &Vec<pthread::Pthread>) {
+        /*self.control.interrupt.store(true, Ordering::Relaxed);
+        for thr in threads {
+            unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
+        }
+        self.control.barrier.wait();
+
+        self.control.interrupt.store(false, Ordering::Relaxed);
+        self.control.barrier.wait();*/
+    }
+
+    pub fn handle_migration(&self, threads: &Vec<pthread::Pthread>) -> bool {
+        match self.additional.migration_support {
+            Some(mig_dest) => {
+                self.control.interrupt.store(true, Ordering::Relaxed);
+                for thr in threads {
+                    unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
+                }
+
+                let mut client = MigrationClient::connect(mig_dest).unwrap();
+
+                let meta = CheckpointConfig {
+                    num_cpus: self.num_cpus,
+                    mem_size: self.mem.len() as isize,
+                    checkpoint_number: 0,
+                    elf_entry: self.elf_entry.unwrap(),
+                    full: self.additional.full_checkpoint
+                };
+
+                client.send_data(unsafe { utils::any_as_u8_slice(&meta) });
+
+                self.control.barrier.wait();
+
+                client.send_data(self.mem.as_ref());
+
+                for cpu in &self.vcpus {
+                    let cpu_state = cpu.save_cpu_state().unwrap();
+                    client.send_data(unsafe { utils::any_as_u8_slice(&cpu_state) });
+                }
+
+                if self.extensions.cap_adjust_clock_stable {
+                    let mut clock = kvm_clock_data::default();
+                    self.get_clock(&mut clock);
+
+                    client.send_data(unsafe { utils::any_as_u8_slice(&clock) });
+                }
+
+                self.control.interrupt.store(false, Ordering::Relaxed);
+                self.control.barrier.wait();
+
+                false
+            },
+            None => true
+        }
+    }
+
+    pub fn handle_signal(&self, sig: &Signal, threads: &Vec<pthread::Pthread>) -> bool {
+        match sig {
+            Signal::INT | Signal::TERM => false,
+            Signal::USR1 => self.handle_migration(threads),
+            _ => true
+        }
+    }
+
     pub fn run(&mut self) -> Result<()> {
         //let mut guest_mem = unsafe { self.mem.as_mut_slice() };
        
         unsafe { *(self.mboot.unwrap().offset(0x24) as *mut u32) = self.num_cpus; }
-        self.running_state.store(true, Ordering::Relaxed);
+        self.control.running.store(true, Ordering::Relaxed);
 
         let signal = ::chan_signal::notify(&[Signal::INT, Signal::TERM, Signal::USR1]);
 
         let mut pthreads = Vec::new();
-        pthreads.push(pthread::pthread_self());
+
+        let rdone = {
+            let (handle, ptid, recv) = self.vcpus[0].run();
+            self.thread_handles.push(handle);
+            pthreads.push(ptid);
+            recv
+        };
 
         for vcpu in &self.vcpus[1..] {
-            let (handle, ptid) = vcpu.run_threaded();
+            let (handle, ptid, _) = vcpu.run();
             self.thread_handles.push(handle);
             pthreads.push(ptid);
         }
 
+        let cp_tick = ::chan::tick_ms(1000);
         let threads = pthreads.clone();
-        let running_state = self.running_state.clone();
 
-        thread::spawn(move || {
-            let mut running = true;
-            while running {
-                match signal.recv().unwrap() {
-                    Signal::INT | Signal::TERM => {
-                        running = false;
-                        running_state.store(false, Ordering::Relaxed);
-
-                        for thr in &threads {
-                            unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
-                        }
-                    },
-                    Signal::USR1 => {
-                        for thr in &threads {
-                            unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
-                        }
-                    },
-                    _ => {}
-                }
+        loop {
+            chan_select! {
+                signal.recv() -> sig => if !self.handle_signal(&sig.unwrap(), &threads) { break },
+                cp_tick.recv() => self.handle_checkpoint(&threads),
+                rdone.recv() => break
             }
-        });
+        }
 
-        let res = self.vcpus[0].run();
+        self.control.running.store(false, Ordering::Relaxed);
 
         // interrupt all threads
         for thr in pthreads {
@@ -569,16 +651,11 @@ impl VirtualMachine {
         }
 
         self.stop()?;
-
-        match res {
-            ExitCode::Innocent => {},
-            ExitCode::Cause(cause) => { if let Err(e) = cause { return Err(e) } }
-        };
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<i32> {
-        self.running_state.store(false, Ordering::Relaxed);
+        self.control.running.store(false, Ordering::Relaxed);
 
         let mut reason = Ok(0);
         while let Some(handle) = self.thread_handles.pop() {
@@ -594,7 +671,7 @@ impl VirtualMachine {
     }
 
     pub fn is_running(&mut self) -> Result<bool> {
-        Ok(self.running_state.load(Ordering::Relaxed))
+        Ok(self.control.running.load(Ordering::Relaxed))
     }
 
     pub fn mem_size(&self) -> usize {

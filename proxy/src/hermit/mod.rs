@@ -42,7 +42,7 @@ pub struct IsleParameterUhyve {
     gateway: Option<Ipv4Addr>,
     mask: Option<Ipv4Addr>,
     checkpoint: u32,
-    full_Checkpoint: bool,
+    full_checkpoint: bool,
     migration_support: Option<Ipv4Addr>,
     migration_type: Option<MigrationType>,
     migration_server: bool
@@ -91,7 +91,7 @@ impl IsleParameter {
                 let gateway = IsleParameter::parse_ip("HERMIT_GATEWAY");
                 let mask = IsleParameter::parse_ip("HERMIT_MASK");
                 let checkpoint = env::var("HERMIT_CHECKPOINT").map(|x| x.parse().unwrap_or(0)).unwrap_or(0);
-                let full_Checkpoint = IsleParameter::parse_bool("HERMIT_FULLCHECKPOINT", false);
+                let full_checkpoint = IsleParameter::parse_bool("HERMIT_FULLCHECKPOINT", false);
                 let migration_support = IsleParameter::parse_ip("HERMIT_MIGRATION_SUPPORT");
                 let migration_type = env::var("HERMIT_MIGRATION_TYPE").map(|x| x.parse::<MigrationType>().map(|x| Some(x)).unwrap_or(None)).unwrap_or(None);
                 let migration_server = IsleParameter::parse_bool("HERMIT_MIGRATION_SERVER", false);
@@ -105,7 +105,7 @@ impl IsleParameter {
                         gateway: gateway,
                         mask: mask,
                         checkpoint: checkpoint,
-                        full_Checkpoint: full_Checkpoint,
+                        full_checkpoint: full_checkpoint,
                         migration_support: migration_support,
                         migration_type: migration_type,
                         migration_server: migration_server

@@ -121,6 +121,7 @@ pub enum Syscall {
 #[derive(Debug)]
 pub enum Return {
     Continue,
+    Interrupt,
     Exit(i32)
 }
 

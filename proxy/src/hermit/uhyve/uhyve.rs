@@ -78,6 +78,7 @@ pub mod ioctl {
     ioctl_read!(set_irqchip, KVMIO, 0x63, kvm_irqchip);
 
     ioctl_write_ptr!(set_clock, KVMIO, 0x7b, kvm_clock_data);
+    ioctl_read!(get_clock, KVMIO, 0x7c, kvm_clock_data);
 }
 
 /// KVM is freezed at version 12, so all others are invalid
@@ -118,10 +119,10 @@ impl KVM {
     }
 
     // Creates a new virtual machine and forwards the new fd to an object
-    pub fn create_vm(&self, size: usize, num_cpus: u32) -> Result<VirtualMachine> {
+    pub fn create_vm(&self, size: usize, num_cpus: u32, add: IsleParameterUhyve) -> Result<VirtualMachine> {
         unsafe {
             match ioctl::create_vm(self.file.as_raw_fd(), 0) {
-                Ok(vm_fd) => VirtualMachine::new(self.file.as_raw_fd(), vm_fd, size, num_cpus),
+                Ok(vm_fd) => VirtualMachine::new(self.file.as_raw_fd(), vm_fd, size, num_cpus, add),
                 Err(_) => Err(Error::IOCTL(NameIOCTL::CreateVM))
             }
         }
@@ -134,7 +135,7 @@ pub struct Uhyve {
 }
 
 impl Uhyve {
-    pub fn new(path: Option<String>, mut mem_size: u64, mut num_cpus: u32, additional: IsleParameterUhyve) -> Result<Uhyve> {
+    pub fn new(path: Option<String>, mut mem_size: u64, mut num_cpus: u32, mut additional: IsleParameterUhyve) -> Result<Uhyve> {
         let mut mig_server: Option<MigrationServer> = None;
         let mut chk: Option<FileCheckpoint> = None;
 
@@ -144,6 +145,7 @@ impl Uhyve {
                 let metadata = migration_server.get_metadata();
                 num_cpus = metadata.get_num_cpus();
                 mem_size = metadata.get_mem_size();
+                additional.full_checkpoint = metadata.get_full();
             }
 
             mig_server = Some(migration_server)
@@ -152,6 +154,7 @@ impl Uhyve {
                 let cfg = chk_file.get_config();
                 num_cpus = cfg.get_num_cpus();
                 mem_size = cfg.get_mem_size();
+                additional.full_checkpoint = cfg.get_full();
             }
 
             chk = Some(chk_file);
@@ -163,7 +166,7 @@ impl Uhyve {
             Version::Unsupported(v) => return Err(Error::KVMApiVersion(v))
         }
 
-        let mut vm = kvm.create_vm(mem_size as usize, num_cpus)?;
+        let mut vm = kvm.create_vm(mem_size as usize, num_cpus, additional)?;
         vm.init()?;
 
         if let Some(mig) = &mut mig_server {
@@ -171,7 +174,7 @@ impl Uhyve {
         } else if let Some(chk) = &chk {
             vm.load_checkpoint(chk.get_config())?;
         } else {
-            vm.load_kernel(&path.ok_or(Error::FileMissing)?, additional)?;
+            vm.load_kernel(&path.ok_or(Error::FileMissing)?)?;
         }
 
         vm.create_cpus()?;

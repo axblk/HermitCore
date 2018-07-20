@@ -98,6 +98,7 @@ pub enum NameIOCTL {
     EnableCap,
     GetIRQChip,
     SetIRQChip,
+    GetClock,
     SetClock,
     GetMSRS,
     SetMSRS,

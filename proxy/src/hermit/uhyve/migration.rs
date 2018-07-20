@@ -1,6 +1,6 @@
 use std::str::FromStr;
-use std::net::{TcpListener, TcpStream, SocketAddr};
-use std::io::Read;
+use std::net::{TcpListener, TcpStream, SocketAddr, Ipv4Addr};
+use std::io::{Read, Write};
 
 use hermit::utils;
 use hermit::error::*;
@@ -26,8 +26,24 @@ impl FromStr for MigrationType {
     }
 }
 
+pub struct MigrationClient {
+    stream: TcpStream
+}
+
+impl MigrationClient {
+    pub fn connect(addr: Ipv4Addr) -> Result<MigrationClient> {
+        Ok(MigrationClient {
+            stream: TcpStream::connect((addr, MIGRATION_PORT)).map_err(|_| Error::MigrationConnection)?
+        })
+    }
+
+    pub fn send_data(&mut self, buf: &[u8]) -> Result<()> {
+        self.stream.write_all(buf).map_err(|_| Error::MigrationStream)
+    }
+}
+
 pub struct MigrationServer {
-    client: TcpStream,
+    stream: TcpStream,
     data: CheckpointData
 }
 
@@ -38,12 +54,12 @@ impl MigrationServer {
         match listener.incoming().next() {
             Some(stream) => {
                 let mut mig_server = MigrationServer {
-                    client: stream.map_err(|_| Error::MigrationConnection)?,
+                    stream: stream.map_err(|_| Error::MigrationConnection)?,
                     data: CheckpointData::default()
                 };
 
                 let mut cfg = CheckpointConfig::default();
-                mig_server.recv_data(unsafe { utils::any_as_u8_slice(&mut cfg) })?;
+                mig_server.recv_data(unsafe { utils::any_as_u8_mut_slice(&mut cfg) })?;
                 mig_server.data.config = cfg;
 
                 Ok(mig_server)
@@ -55,14 +71,14 @@ impl MigrationServer {
     pub fn recv_cpu_states(&mut self) -> Result<()> {
         for _ in 0 .. self.data.config.get_num_cpus() {
             let mut cpu_state = vcpu_state::default();
-            self.recv_data(unsafe { utils::any_as_u8_slice(&mut cpu_state) })?;
+            self.recv_data(unsafe { utils::any_as_u8_mut_slice(&mut cpu_state) })?;
             self.data.cpu_states.push(cpu_state);
         }
         Ok(())
     }
 
     pub fn recv_data(&mut self, buf: &mut [u8]) -> Result<()> {
-        self.client.read_exact(buf).map_err(|_| Error::MigrationStream)
+        self.stream.read_exact(buf).map_err(|_| Error::MigrationStream)
     }
 
     pub fn get_metadata(&self) -> &CheckpointConfig {
