@@ -34,7 +34,7 @@ use hermit::multi::Multi;
 use hermit::uhyve::Uhyve;
 use hermit::error::Result;
 
-fn create_isle(path: &str, specs: IsleParameter) -> Result<()> {
+fn create_isle(path: Option<String>, specs: IsleParameter) -> Result<()> {
     let mut isle: Box<Isle> = match specs {
         IsleParameter::QEmu { mem_size, num_cpus, additional} => Box::new(QEmu::new(path, mem_size, num_cpus, additional)?),
         IsleParameter::UHyve{ mem_size, num_cpus, additional } => Box::new(Uhyve::new(path, mem_size, num_cpus, additional)?),
@@ -52,8 +52,8 @@ fn main() {
     let verbose = IsleParameter::parse_bool("HERMIT_VERBOSE", false);
     unsafe { hermit::verbose = verbose; }
 
-    let args: Vec<String> = env::args().collect();
-    if let Err(e) = create_isle(&args[1], IsleParameter::from_env()) {
+    let path = env::args().nth(1);
+    if let Err(e) = create_isle(path, IsleParameter::from_env()) {
         println!("Error: {}", e);
         process::exit(1);
     }

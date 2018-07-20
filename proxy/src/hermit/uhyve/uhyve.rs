@@ -134,7 +134,7 @@ pub struct Uhyve {
 }
 
 impl Uhyve {
-    pub fn new(path: &str, mut mem_size: u64, mut num_cpus: u32, additional: IsleParameterUhyve) -> Result<Uhyve> {
+    pub fn new(path: Option<String>, mut mem_size: u64, mut num_cpus: u32, additional: IsleParameterUhyve) -> Result<Uhyve> {
         let mut mig_server: Option<MigrationServer> = None;
         let mut chk: Option<FileCheckpoint> = None;
 
@@ -171,7 +171,7 @@ impl Uhyve {
         } else if let Some(chk) = &chk {
             vm.load_checkpoint(chk.get_config())?;
         } else {
-            vm.load_kernel(path, additional)?;
+            vm.load_kernel(&path.ok_or(Error::FileMissing)?, additional)?;
         }
 
         vm.create_cpus()?;

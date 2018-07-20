@@ -14,7 +14,7 @@ pub struct Multi {
 }
 
 impl Multi {
-    pub fn new(num: u8, path: &str, num_cpus: u32) -> Result<Multi> {
+    pub fn new(num: u8, path: Option<String>, num_cpus: u32) -> Result<Multi> {
         let cpu_path = format!("/sys/hermit/isle{}/path", num);
         let bin_path = format!("/sys/hermit/isle{}/cpus", num);
 
@@ -28,7 +28,7 @@ impl Multi {
             
             let cpus = num_cpus.to_string();
 
-            path_file.write_all(path.as_bytes())
+            path_file.write_all(path.ok_or(Error::FileMissing)?.as_bytes())
                 .map_err(|_| Error::InvalidFile(cpu_path.clone()))?;
             
             cpus_file.write_all(cpus.as_bytes())

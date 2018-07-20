@@ -25,7 +25,7 @@ pub struct QEmu {
 }
 
 impl QEmu {
-    pub fn new(path: &str, mem_size: u64, num_cpus: u32, additional: IsleParameterQEmu) -> Result<QEmu> {
+    pub fn new(path: Option<String>, mem_size: u64, num_cpus: u32, additional: IsleParameterQEmu) -> Result<QEmu> {
         let tmpf = utils::TmpFile::create(TMPNAME)?;
         let pidf = utils::TmpFile::create(PIDNAME)?;
         
@@ -37,7 +37,8 @@ impl QEmu {
 
         debug!("port number: {}", port);
 
-        let mut child = QEmu::start_with(path, port, mem_size, num_cpus, additional, tmpf.get_path(), pidf.get_path()).spawn()
+        let mut child = QEmu::start_with(&path.ok_or(Error::FileMissing)?,
+            port, mem_size, num_cpus, additional, tmpf.get_path(), pidf.get_path()).spawn()
             .map_err(|_| Error::MissingQEmuBinary)?;
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
