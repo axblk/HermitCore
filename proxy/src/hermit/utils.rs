@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{mkstemp, close};
+use raw_cpuid::CpuId;
 
 use hermit::error::*;
 
@@ -15,6 +16,12 @@ pub unsafe fn any_as_u8_slice<T: Sized>(p: &mut T) -> &mut [u8] {
 
 /// Returns the CPU frequency
 pub fn cpufreq() -> Result<u32> {
+    let cpuid = CpuId::new();
+
+    if let Some(freq) = cpuid.get_processor_frequency_info() {
+        return Ok(freq.processor_base_frequency() as u32);
+    }
+
     let mut content = String::new();
    
     // If the file cpuinfo_max_freq exists, parse the content and return the frequency
