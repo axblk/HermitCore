@@ -2,19 +2,22 @@
 //! VM layer
 
 use libc;
-use std::io::Cursor;
 use memmap::{Mmap, MmapMut};
 use elf;
 use elf::types::{ELFCLASS64, OSABI, PT_LOAD, ET_EXEC, EM_X86_64};
+use std::io::Cursor;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::thread::JoinHandle;
 use std::ptr;
 use std::fs::File;
 use std::io::{BufReader, Read};
 
 use byteorder::{ReadBytesExt, NativeEndian};
+use chan_signal::Signal;
+use nix::sys::pthread;
 
 use hermit::is_verbose;
 use hermit::IsleParameterUhyve;
@@ -522,13 +525,50 @@ impl VirtualMachine {
         unsafe { *(self.mboot.unwrap().offset(0x24) as *mut u32) = self.num_cpus; }
         self.running_state.store(true, Ordering::Relaxed);
 
+        let signal = ::chan_signal::notify(&[Signal::INT, Signal::TERM, Signal::USR1]);
+
+        let mut pthreads = Vec::new();
+        pthreads.push(pthread::pthread_self());
+
         for vcpu in &self.vcpus[1..] {
-            self.thread_handles.push(vcpu.run_threaded());
+            let (handle, ptid) = vcpu.run_threaded();
+            self.thread_handles.push(handle);
+            pthreads.push(ptid);
         }
+
+        let threads = pthreads.clone();
+        let running_state = self.running_state.clone();
+
+        thread::spawn(move || {
+            let mut running = true;
+            while running {
+                match signal.recv().unwrap() {
+                    Signal::INT | Signal::TERM => {
+                        running = false;
+                        running_state.store(false, Ordering::Relaxed);
+
+                        for thr in &threads {
+                            unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
+                        }
+                    },
+                    Signal::USR1 => {
+                        for thr in &threads {
+                            unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        });
 
         let res = self.vcpus[0].run();
 
-        //self.stop()?;
+        // interrupt all threads
+        for thr in pthreads {
+            unsafe { libc::pthread_kill(thr, libc::SIGUSR2); }
+        }
+
+        self.stop()?;
 
         match res {
             ExitCode::Innocent => {},

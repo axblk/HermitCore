@@ -108,5 +108,6 @@ pub enum NameIOCTL {
     GetXSave,
     SetXSave,
     GetXCRS,
-    SetXCRS
+    SetXCRS,
+    SetSignalMask
 }

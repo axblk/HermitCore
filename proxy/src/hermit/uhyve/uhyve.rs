@@ -49,6 +49,8 @@ pub mod ioctl {
     ioctl_readwrite!(get_msrs, KVMIO, 0x88, kvm_msrs);
     ioctl_write_ptr!(set_msrs, KVMIO, 0x89, kvm_msrs);
 
+    ioctl_write_ptr!(set_signal_mask, KVMIO, 0x8b, kvm_signal_mask);
+
     ioctl_read!(get_fpu, KVMIO, 0x8c, kvm_fpu);
     ioctl_write_ptr!(set_fpu, KVMIO, 0x8d, kvm_fpu);
 

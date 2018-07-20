@@ -9,6 +9,10 @@ use std::thread;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
+
+use nix::sys::signal;
+use nix::sys::pthread;
 use nix::errno::Errno;
 use nix;
 
@@ -135,6 +139,14 @@ pub struct kvm_msr_data {
 	info: kvm_msrs,
 	entries: [kvm_msr_entry; 25]
 }
+
+#[repr(C)]
+pub struct kvm_signal_mask_data {
+	info: kvm_signal_mask,
+	sigset: libc::sigset_t
+}
+
+extern "C" fn empty_handler(_: libc::c_int) {}
 
 impl VirtualCPU {
     pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, mem: &mut MmapMut, mboot: *mut u8, running_state: Arc<AtomicBool>, extensions: KVMExtensions) -> Result<VirtualCPU> {
@@ -476,8 +488,24 @@ impl VirtualCPU {
         Ok(())
     }
 
+    fn set_signal_mask_fd(vcpu_fd: i32, mut data: kvm_signal_mask_data) -> Result<()> {
+        unsafe {
+            uhyve::ioctl::set_signal_mask(vcpu_fd, (&mut data.info) as *mut kvm_signal_mask)
+                .map_err(|_| Error::IOCTL(NameIOCTL::SetSignalMask))?;
+        }
+
+        Ok(())
+    }
+
     pub fn single_run(fd: RawFd, id: u32, state: &Arc<SharedState>) -> Result<proto::Return> {
+        let mut newset = signal::SigSet::empty();
+        let mut oldset = signal::SigSet::empty();
+        newset.add(signal::Signal::SIGUSR2);
+        let _ = signal::pthread_sigmask(signal::SigmaskHow::SIG_BLOCK, Some(&newset), Some(&mut oldset));
+
         let ret = unsafe { uhyve::ioctl::run(fd, ptr::null_mut()) };
+
+        let _ = signal::pthread_sigmask(signal::SigmaskHow::SIG_SETMASK, Some(&oldset), None);
 
         debug!("Single Run CPU {}", id);
 
@@ -517,6 +545,22 @@ impl VirtualCPU {
             volatile_store(state.mboot.offset(0x30), id as u8);
         }
 
+        let tmp = signal::SigSet::empty();
+        let sigset = tmp.as_ref().clone();
+
+        let mut sig_mask = kvm_signal_mask::default();
+        sig_mask.len = 8;
+        let sig_mask_data = kvm_signal_mask_data { info: sig_mask, sigset: sigset };
+
+        let _ = VirtualCPU::set_signal_mask_fd(fd, sig_mask_data);
+
+        let sigaction = signal::SigAction::new(
+            signal::SigHandler::Handler(empty_handler),
+            signal::SaFlags::empty(),
+            signal::SigSet::empty(),
+        );
+        unsafe { let _ = signal::sigaction(signal::Signal::SIGUSR2, &sigaction); }
+
         while state.running_state.load(Ordering::Relaxed) {
             match VirtualCPU::single_run(fd, id, &state) {
                 Ok(proto::Return::Exit(code)) => {
@@ -536,14 +580,21 @@ impl VirtualCPU {
         ExitCode::Innocent
     }
 
-    pub fn run_threaded(&self) -> JoinHandle<ExitCode> {
+    pub fn run_threaded(&self) -> (JoinHandle<ExitCode>, pthread::Pthread) {
         debug!("Run CPU {} threaded", self.id);
 
         let state = self.state.clone();
         let id = self.id;
         let fd = self.vcpu_fd;
 
-        thread::spawn(move || VirtualCPU::run_vcpu(state, id, fd))
+        let (sender, receiver) = channel();
+
+        let handle = thread::spawn(move || {
+            let _ = sender.send(pthread::pthread_self());
+            VirtualCPU::run_vcpu(state, id, fd)
+        });
+
+        (handle, receiver.recv().unwrap())
     }
 
     pub fn run(&self) -> ExitCode {

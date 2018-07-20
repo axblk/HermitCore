@@ -12,6 +12,7 @@ extern crate elf;
 extern crate errno;
 extern crate inotify;
 extern crate byteorder;
+extern crate chan_signal;
 
 #[macro_use]
 extern crate nix;
