@@ -219,10 +219,7 @@ int get_task(tid_t id, task_t** task);
  */
 int set_timer(uint64_t deadline);
 
-
-/** @brief check is a timer is expired
- *
- */
+/** @brief check is a timer is expired */
 void check_timers(void);
 
 
@@ -234,12 +231,13 @@ void NORETURN do_abort(void);
 void NORETURN leave_kernel_task(void);
 
 
-/** @brief if a task exists with higher priority, HermitCore switch to it.
- */
+/** @brief if a task exists with higher priority, HermitCore switch to it. */
 void check_scheduling(void);
 
-/** @brief This function shutdowns the (ip) network
- */
+/** @brief return true if a task is available and ready. */
+int is_task_available(void);
+
+/** @brief This function shutdowns the (ip) network */
 int network_shutdown(void);
 
 
@@ -254,7 +252,6 @@ void check_ticks(void);
  */
 void shutdown_system(void);
 
-
 extern volatile uint32_t go_down;
 static inline void check_workqueues_in_irqhandler(int irq)
 {
@@ -265,11 +262,10 @@ static inline void check_workqueues_in_irqhandler(int irq)
 
 	check_timers();
 
-	if (irq < 0) {
-		if (go_down)
-			shutdown_system();
+	if (go_down)
+		shutdown_system();
+	if (irq < 0)
 		check_scheduling();
-	}
 }
 
 static inline void check_workqueues(void)
@@ -281,6 +277,10 @@ static inline void check_workqueues(void)
 /** @brief check if a proxy is available
  */
 int is_proxy(void);
+
+/** @brief initialized the stacks of the idle tasks
+ */
+int set_boot_stack(tid_t id, size_t stack, size_t ist_addr);
 
 #ifdef __cplusplus
 }
