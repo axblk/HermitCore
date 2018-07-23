@@ -26,8 +26,7 @@ use super::checkpoint::vcpu_state;
 use super::vm::{KVMExtensions, ControlData};
 use super::utils;
 
-pub const GUEST_OFFSET: usize = 0x0;
-pub const CPUID_FUNC_PERFMON: usize = 0x0A;
+pub const CPUID_FUNC_PERFMON: u32 = 0x0A;
 pub const GUEST_PAGE_SIZE: usize = 0x200000;
 
 // TODO configuration missing
@@ -696,7 +695,7 @@ impl VirtualCPU {
                     }
                     entry.edx |= 1u32 << 5; // enable msr support
                 },
-                0x0A => {
+                CPUID_FUNC_PERFMON => {
                     // disable it
                     entry.eax = 0x00;
                 },

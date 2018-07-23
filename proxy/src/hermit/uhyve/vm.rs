@@ -82,9 +82,6 @@ pub const VIRT_BITS:        usize = 48;
 pub const PAGE_MAP_BITS:    usize = 9;
 pub const PAGE_LEVELS:      usize = 4;
 
-// guest offset?
-//pub const GUEST_OFFSET = 0;
-
 #[derive(Default, Clone)]
 pub struct KVMExtensions {
     pub cap_tsc_deadline: bool,
