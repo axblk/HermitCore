@@ -24,6 +24,7 @@ pub enum Error {
     UnsupportedMigrationType(String),
     KVMConnection,
     InvalidCheckpoint,
+    WriteCheckpoint,
     KVMApiVersion(i32),
     CAPIRQFD,
     MigrationConnection,
@@ -32,7 +33,8 @@ pub enum Error {
     VCPUStatesNotInitialized,
     TranslationFault(u64),
     KVMRunFailed(u32),
-    KVMDebug
+    KVMDebug,
+    ThreadError
 }
 
 impl fmt::Display for Error {
@@ -57,6 +59,7 @@ impl fmt::Display for Error {
             Error::UnsupportedMigrationType(ref name) => write!(f, "Migration type '{}' not supported.", name),
             Error::KVMConnection => write!(f, "Could not open: /dev/kvm"),
             Error::InvalidCheckpoint => write!(f, "Invalid checkpoint data"),
+            Error::WriteCheckpoint => write!(f, "Could not write checkpoint"),
             Error::KVMApiVersion(version) => write!(f, "KVM: API version is {}, uhyve requires version 12", version),
             Error::CAPIRQFD => write!(f, "The support of KVM_CAP_IRQFD is curently required"),
             Error::MigrationConnection => write!(f, "Migration connection error"),
@@ -65,7 +68,8 @@ impl fmt::Display for Error {
             Error::VCPUStatesNotInitialized => write!(f, "vcpu states not initialized"),
             Error::TranslationFault(rip) => write!(f, "KVM: host/guest translation fault: rip={:#x}", rip),
             Error::KVMRunFailed(cpuid) => write!(f, "KVM: ioctl KVM_RUN in vcpu_loop for cpuid {} failed", cpuid),
-            Error::KVMDebug => write!(f, "KVM: debug")
+            Error::KVMDebug => write!(f, "KVM: debug"),
+            Error::ThreadError => write!(f, "KVM: thread failed")
         }
     }
 }

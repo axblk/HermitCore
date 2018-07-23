@@ -262,11 +262,11 @@ impl VirtualCPU {
         cpu_state.regs = self.get_regs()?;
         self.get_msrs(&mut cpu_state.msr_data)?;
         cpu_state.xcrs = self.get_xcrs()?;
-        cpu_state.mp_state = self.get_mp_state()?;
         cpu_state.lapic = self.get_lapic()?;
         cpu_state.fpu = self.get_fpu()?;
         cpu_state.xsave = self.get_xsave()?;
         cpu_state.events = self.get_vcpu_events()?;
+        cpu_state.mp_state = self.get_mp_state()?;
 
         Ok(cpu_state)
     }
@@ -497,16 +497,9 @@ impl VirtualCPU {
     }
 
     pub fn single_run(fd: RawFd, id: u32, state: &Arc<SharedState>) -> Result<proto::Return> {
-        let mut newset = signal::SigSet::empty();
-        let mut oldset = signal::SigSet::empty();
-        newset.add(signal::Signal::SIGUSR2);
-        let _ = signal::pthread_sigmask(signal::SigmaskHow::SIG_BLOCK, Some(&newset), Some(&mut oldset));
-
         let ret = unsafe { uhyve::ioctl::run(fd, ptr::null_mut()) };
 
-        let _ = signal::pthread_sigmask(signal::SigmaskHow::SIG_SETMASK, Some(&oldset), None);
-
-        debug!("Single Run CPU {}", id);
+        //debug!("Single Run CPU {}", id);
 
         if let Err(e) = ret {
             return match e {
@@ -545,11 +538,11 @@ impl VirtualCPU {
         }
 
         let tmp = signal::SigSet::empty();
-        let sigset = tmp.as_ref().clone();
+        let kvm_sigset = tmp.as_ref().clone();
 
         let mut sig_mask = kvm_signal_mask::default();
         sig_mask.len = 8;
-        let sig_mask_data = kvm_signal_mask_data { info: sig_mask, sigset: sigset };
+        let sig_mask_data = kvm_signal_mask_data { info: sig_mask, sigset: kvm_sigset };
 
         let _ = VirtualCPU::set_signal_mask_fd(fd, sig_mask_data);
 
@@ -560,13 +553,21 @@ impl VirtualCPU {
         );
         unsafe { let _ = signal::sigaction(signal::Signal::SIGUSR2, &sigaction); }
 
+        let mut newset = signal::SigSet::empty();
+        newset.add(signal::Signal::SIGUSR2);
+        let oldset = newset.thread_swap_mask(signal::SigmaskHow::SIG_BLOCK).unwrap();
+
         while state.control.running.load(Ordering::Relaxed) {
             match VirtualCPU::single_run(fd, id, &state) {
                 Ok(proto::Return::Interrupt) => {
+                    debug!("Interrupted {}", id);
                     if state.control.interrupt.load(Ordering::Relaxed) {
                         state.control.barrier.wait();
                         state.control.barrier.wait();
                     }
+
+                    let _ = oldset.thread_set_mask();
+                    let _ = newset.thread_block();
                 },
                 Ok(proto::Return::Exit(code)) => {
                     state.control.running.store(false, Ordering::Relaxed);

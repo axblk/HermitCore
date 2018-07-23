@@ -140,7 +140,7 @@ impl Isle for QEmu {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<i32> {
+    fn stop(&mut self) -> Result<()> {
         let mut id_str = String::new();
         self.pid_file.read_to_string(&mut id_str).ok();
         id_str.pop();
@@ -151,7 +151,7 @@ impl Isle for QEmu {
             }
         }
 
-        Ok(0)
+        Ok(())
     }
 
     fn output(&self) -> String {

@@ -70,7 +70,7 @@ impl Isle for Multi {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<i32> {
+    fn stop(&mut self) -> Result<()> {
         debug!("Stop the HermitIsle");
 
         let cpu_path = format!("/sys/hermit/isle{}/path", self.num);
@@ -81,7 +81,7 @@ impl Isle for Multi {
         cpus_file.write("-1".as_bytes())
             .map_err(|_| Error::InvalidFile(cpu_path))?;
     
-        Ok(0)
+        Ok(())
     }
 
     fn output(&self) -> String {

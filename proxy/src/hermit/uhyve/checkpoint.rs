@@ -1,6 +1,6 @@
 use std::str::Lines;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{Read, Write};
 
 use super::vcpu::kvm_msr_data;
 use hermit::uhyve::kvm_header::*;
@@ -95,33 +95,67 @@ impl CheckpointConfig {
 
 impl FileCheckpoint {
     pub fn load() -> Result<FileCheckpoint> {
-        match File::open("checkpoint/chk_config.txt") {
-            Ok(mut chk_file) => {
-                let mut contents = String::new();
-                chk_file.read_to_string(&mut contents).map_err(|_| Error::InvalidCheckpoint)?;
-                let data = CheckpointData {
-                    config: CheckpointConfig::from(&contents)?,
-                    cpu_states: Vec::new()
-                };
+        let mut chk_file = File::open("checkpoint/chk_config.txt")
+            .map_err(|_| Error::NoCheckpointFile)?;
 
-                Ok(FileCheckpoint { data: data })
-            },
-            Err(_) => Err(Error::NoCheckpointFile)
+        let mut contents = String::new();
+        chk_file.read_to_string(&mut contents).map_err(|_| Error::InvalidCheckpoint)?;
+        let data = CheckpointData {
+            config: CheckpointConfig::from(&contents)?,
+            cpu_states: Vec::new()
+        };
+
+        let mut file_chk = FileCheckpoint { data: data };
+        file_chk.read_cpu_states()?;
+
+        Ok(file_chk)
+    }
+
+    pub fn new(config: CheckpointConfig) -> FileCheckpoint {
+        FileCheckpoint {
+            data: CheckpointData {
+                config: config,
+                cpu_states: Vec::new()
+            }
         }
     }
 
-    pub fn read_cpu_states(&mut self) -> Result<()> {
-        debug!("{}", ::std::mem::size_of::<vcpu_state>());
+    pub fn save(&self) -> Result<()> {
+        let mut chk_file = File::create("checkpoint/chk_config.txt")
+            .map_err(|_| Error::WriteCheckpoint)?;
+        
+        let content = self.data.config.to_string();
+        chk_file.write_all(content.as_bytes()).map_err(|_| Error::WriteCheckpoint)?;
+
+        self.write_cpu_states()?;
+        Ok(())
+    }
+
+    fn read_cpu_states(&mut self) -> Result<()> {
         for cpuid in 0 .. self.data.config.get_num_cpus() {
             let file_name = format!("checkpoint/chk{}_core{}.dat", self.data.config.get_checkpoint_number(), cpuid);
-            let file = File::open(&file_name).map_err(|_| Error::InvalidFile(file_name.clone()))?;
-            let mut reader = BufReader::new(file);
+            let mut file = File::open(&file_name).map_err(|_| Error::InvalidCheckpoint)?;
             
             let mut cpu_state = vcpu_state::default();
-            reader.read_exact(unsafe { utils::any_as_u8_mut_slice(&mut cpu_state) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+            file.read_exact(unsafe { utils::any_as_u8_mut_slice(&mut cpu_state) }).map_err(|_| Error::InvalidCheckpoint)?;
             self.data.cpu_states.push(cpu_state);
         }
         Ok(())
+    }
+
+    fn write_cpu_states(&self) -> Result<()> {
+        for cpuid in 0 .. self.data.cpu_states.len() {
+            let file_name = format!("checkpoint/chk{}_core{}.dat", self.data.config.get_checkpoint_number(), cpuid);
+            let mut file = File::create(&file_name).map_err(|_| Error::WriteCheckpoint)?;
+            
+            let state = &self.data.cpu_states[cpuid];
+            file.write_all(unsafe { utils::any_as_u8_slice(state) }).map_err(|_| Error::WriteCheckpoint)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_mem_file_path(checkpoint_num: u32) -> String {
+        format!("checkpoint/chk{}_mem.dat", checkpoint_num)
     }
 
     pub fn get_config(&self) -> &CheckpointConfig {

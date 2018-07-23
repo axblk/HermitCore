@@ -146,7 +146,7 @@ pub trait Isle {
     fn output(&self) -> String;
 
     fn run(&mut self) -> Result<()>;
-    fn stop(&mut self) -> Result<i32>;
+    fn stop(&mut self) -> Result<()>;
 
     fn is_available(&self) -> Result<bool> {
         let log = match self.log_file() {

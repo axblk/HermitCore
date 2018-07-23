@@ -57,7 +57,7 @@ fn main() {
 
     let path = env::args().nth(1);
     if let Err(e) = create_isle(path, IsleParameter::from_env()) {
-        println!("Error: {}", e);
+        eprintln!("Error: {}", e);
         process::exit(1);
     }
 }

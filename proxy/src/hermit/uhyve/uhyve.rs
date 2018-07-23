@@ -182,7 +182,6 @@ impl Uhyve {
         if let Some(mig) = &mut mig_server {
             vm.restore_cpus(mig.get_cpu_states())?;
         } else if let Some(chk) = &mut chk {
-            chk.read_cpu_states()?;
             vm.restore_cpus(chk.get_cpu_states())?;
         } else {
             vm.init_cpus()?;
@@ -208,7 +207,7 @@ impl Isle for Uhyve {
         self.vm.run()
     }
 
-    fn stop(&mut self) -> Result<i32> {
+    fn stop(&mut self) -> Result<()> {
         self.vm.stop()
     }
 

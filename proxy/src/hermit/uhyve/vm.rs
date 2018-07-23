@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 use std::ptr;
-use std::fs::File;
-use std::io::{BufReader, Read};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::net::Ipv4Addr;
 
 use byteorder::{ReadBytesExt, NativeEndian};
 use chan_signal::Signal;
@@ -26,7 +28,7 @@ use super::kvm_header::*;
 use super::{Result, Error, NameIOCTL};
 use super::vcpu::{ExitCode, VirtualCPU};
 use super::proto::PORT_UART;
-use super::checkpoint::{CheckpointConfig, vcpu_state};
+use super::checkpoint::{CheckpointConfig, FileCheckpoint, vcpu_state};
 use super::migration::{MigrationServer, MigrationClient};
 
 pub const KVM_32BIT_MAX_MEM_SIZE:   usize = 1 << 32;
@@ -73,6 +75,12 @@ pub const PG_SELF:			u32 = 1 << 9;
 
 /// Disable execution for this page
 pub const PG_XD:            u32 = 0; //(1u32 << 63);
+
+pub const BITS:             usize = 64;
+pub const PHYS_BITS:        usize = 52;
+pub const VIRT_BITS:        usize = 48;
+pub const PAGE_MAP_BITS:    usize = 9;
+pub const PAGE_LEVELS:      usize = 4;
 
 // guest offset?
 //pub const GUEST_OFFSET = 0;
@@ -271,16 +279,17 @@ impl VirtualMachine {
             self.mboot = Some(self.mem.as_mut_ptr().offset(chk.get_elf_entry() as isize) as *mut u8);
         }
 
+        self.elf_entry = Some(chk.get_elf_entry());
+
         let chk_num = chk.get_checkpoint_number();
         let start = if chk.get_full() { chk_num } else { 0 };
 
         for i in start .. chk_num+1 {
-            let file_name = format!("checkpoint/chk{}_mem.dat", i);
-            let file = File::open(&file_name).map_err(|_| Error::InvalidFile(file_name.clone()))?;
-            let mut reader = BufReader::new(file);
+            let file_name = FileCheckpoint::get_mem_file_path(i);
+            let mut file = File::open(&file_name).map_err(|_| Error::InvalidFile(file_name.clone()))?;
             
             let mut clock = kvm_clock_data::default();
-            reader.read_exact(unsafe { utils::any_as_u8_mut_slice(&mut clock) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+            file.read_exact(unsafe { utils::any_as_u8_mut_slice(&mut clock) }).map_err(|_| Error::InvalidFile(file_name.clone()))?;
 
             if self.extensions.cap_adjust_clock_stable && i == chk_num {
                 let mut data = kvm_clock_data::default();
@@ -289,12 +298,12 @@ impl VirtualMachine {
                 let _ = self.set_clock(data);
             }
 
-            while let Ok(location) = reader.read_i64::<NativeEndian>() {
+            while let Ok(location) = file.read_i64::<NativeEndian>() {
                 let location = location as isize;
                 let dest_addr = unsafe { self.mem.as_mut_ptr().offset(determine_dest_offset(location)) };
                 let len = if location & PG_PSE as isize != 0 { 1 << PAGE_2M_BITS } else { 1 << PAGE_BITS };
                 let dest = unsafe { ::std::slice::from_raw_parts_mut(dest_addr, len) };
-                reader.read_exact(dest).map_err(|_| Error::InvalidFile(file_name.clone()))?;
+                file.read_exact(dest).map_err(|_| Error::InvalidFile(file_name.clone()))?;
             }
         }
 
@@ -306,21 +315,24 @@ impl VirtualMachine {
     }
 
     pub fn load_migration(&mut self, mig: &mut MigrationServer) -> Result<()> {
+        let entry = mig.get_metadata().get_elf_entry();
+
         unsafe {
-            let entry = mig.get_metadata().get_elf_entry();
             self.klog = Some(self.mem.as_ptr().offset(entry as isize + 0x5000) as *const i8);
             self.mboot = Some(self.mem.as_mut_ptr().offset(entry as isize) as *mut u8);
         }
 
+        self.elf_entry = Some(entry);
+
         mig.recv_data(self.mem.as_mut())?;
-        debug!("Guest memory received");
+        debug!("Guest memory received: {}", self.mem.len());
 
         mig.recv_cpu_states()?;
-        debug!("CPU states received");
 
         if self.extensions.cap_adjust_clock_stable {
             let mut clock = kvm_clock_data::default();
             mig.recv_data(unsafe { utils::any_as_u8_mut_slice(&mut clock) })?;
+            debug!("Received clock: {}", ::std::mem::size_of::<kvm_clock_data>());
 
             let mut data = kvm_clock_data::default();
             data.clock = clock.clock;
@@ -545,63 +557,194 @@ impl VirtualMachine {
 
     }
 
-    pub fn handle_checkpoint(&self, threads: &Vec<pthread::Pthread>) {
-        /*self.control.interrupt.store(true, Ordering::Relaxed);
-        for thr in threads {
-            unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
+    fn scan_page_tables(&mut self, mut file: File) -> Result<()> {
+        let flag = if !self.additional.full_checkpoint && self.checkpoint_num > 0 {
+            PG_DIRTY
+        } else {
+            PG_ACCESSED
+        } as isize;
+
+        let mem_ptr = self.mem.as_mut_ptr();
+        const PAGE_MAP_SIZE: usize = 1 << PAGE_MAP_BITS;
+
+        unsafe {
+            let plm4_ptr = mem_ptr.offset(self.elf_entry.ok_or(Error::KernelNotLoaded)? as isize + PAGE_SIZE as isize) as *const isize;
+            let plm4 = ::std::slice::from_raw_parts(plm4_ptr, PAGE_MAP_SIZE);
+            for plm4_i in plm4 {
+                if (*plm4_i & PG_PRESENT as isize) != PG_PRESENT as isize {
+                    continue;
+                }
+
+                let pdpt_ptr = mem_ptr.offset(*plm4_i & PAGE_MASK as isize) as *const isize;
+                let pdpt = ::std::slice::from_raw_parts(pdpt_ptr, PAGE_MAP_SIZE);
+                for pdpt_j in pdpt {
+                    if (*pdpt_j & PG_PRESENT as isize) != PG_PRESENT as isize {
+                        continue;
+                    }
+
+                    let pgd_ptr = mem_ptr.offset(*pdpt_j & PAGE_MASK as isize) as *mut isize;
+                    let pgd = ::std::slice::from_raw_parts_mut(pgd_ptr, PAGE_MAP_SIZE);
+                    for pgd_k in pgd {
+                        if (*pgd_k & PG_PRESENT as isize) != PG_PRESENT as isize {
+                            continue;
+                        }
+
+                        if (*pgd_k & PG_PSE as isize) != PG_PSE as isize {
+                            let pgt_ptr = mem_ptr.offset(*pgd_k & PAGE_MASK as isize) as *mut isize;
+                            let pgt = ::std::slice::from_raw_parts_mut(pgt_ptr, PAGE_MAP_SIZE);
+                            for pgt_l in pgt {
+                                if (*pgt_l & (PG_PRESENT as isize|flag)) == (PG_PRESENT as isize|flag) as isize {
+                                    if !self.additional.full_checkpoint {
+                                        *pgt_l = *pgt_l & !(PG_DIRTY|PG_ACCESSED) as isize;
+                                    }
+
+                                    let pgt_entry = *pgt_l & !(PG_PSE) as isize;
+                                    let mut data = utils::any_as_u8_slice(&pgt_entry);
+                                    file.write_all(data).map_err(|_| Error::WriteCheckpoint)?;
+
+                                    let data_ptr = mem_ptr.offset(*pgt_l & PAGE_MASK as isize);
+                                    let mut data = ::std::slice::from_raw_parts(data_ptr, 1 << PAGE_BITS);
+                                    file.write_all(data).map_err(|_| Error::WriteCheckpoint)?;
+                                }
+                            }
+                        } else if (*pgd_k & flag) == flag {
+                            if !self.additional.full_checkpoint {
+                                *pgd_k = *pgd_k & !(PG_DIRTY|PG_ACCESSED) as isize;
+                            }
+
+                            let mut data = utils::any_as_u8_slice(pgd_k);
+                            file.write_all(data).map_err(|_| Error::WriteCheckpoint)?;
+
+                            let data_ptr = mem_ptr.offset(*pgd_k & PAGE_2M_MASK as isize);
+                            let mut data = ::std::slice::from_raw_parts(data_ptr, 1 << PAGE_2M_BITS);
+                            file.write_all(data).map_err(|_| Error::WriteCheckpoint)?;
+                        }
+                    }
+                }
+            }
         }
+
+        Ok(())
+    }
+
+    fn get_checkpoint_config(&self) -> Result<CheckpointConfig> {
+        Ok(CheckpointConfig {
+            num_cpus: self.num_cpus,
+            mem_size: self.mem.len() as isize,
+            checkpoint_number: self.checkpoint_num,
+            elf_entry: self.elf_entry.ok_or(Error::KernelNotLoaded)?,
+            full: self.additional.full_checkpoint
+        })
+    }
+
+    fn create_checkpoint(&mut self) -> Result<()> {
+        if !Path::new("checkpoint").exists() {
+            fs::create_dir("checkpoint").map_err(|_| Error::WriteCheckpoint)?;
+        }
+
+        let mut chk = FileCheckpoint::new(self.get_checkpoint_config()?);
+
+        for cpu in &self.vcpus {
+            chk.get_cpu_states().push(cpu.save_cpu_state()?);
+        }
+
+        let file_name = FileCheckpoint::get_mem_file_path(self.checkpoint_num);
+        let mut file = File::create(&file_name).map_err(|_| Error::WriteCheckpoint)?;
+
+        let mut clock = kvm_clock_data::default();
+        self.get_clock(&mut clock)?;
+
+        file.write_all(unsafe { utils::any_as_u8_slice(&clock) })
+            .map_err(|_| Error::WriteCheckpoint)?;
+
+        self.scan_page_tables(file)?;
+
+        chk.save()?;
+
+        self.checkpoint_num += 1;
+
+        Ok(())
+    }
+
+    fn handle_checkpoint(&mut self, threads: &Vec<pthread::Pthread>) {
+        self.control.interrupt.store(true, Ordering::Relaxed);
+        for thr in threads {
+            unsafe { libc::pthread_kill(*thr, libc::SIGUSR2); }
+        }
+
         self.control.barrier.wait();
 
+        match self.create_checkpoint() {
+            Ok(()) => debug!("Successfully wrote checkpoint"),
+            Err(e) => eprintln!("Failed to write checkpoint: {}", e)
+        };
+
         self.control.interrupt.store(false, Ordering::Relaxed);
-        self.control.barrier.wait();*/
+        self.control.barrier.wait();
     }
 
-    pub fn handle_migration(&self, threads: &Vec<pthread::Pthread>) -> bool {
-        match self.additional.migration_support {
-            Some(mig_dest) => {
-                self.control.interrupt.store(true, Ordering::Relaxed);
-                for thr in threads {
-                    unsafe { libc::pthread_kill(thr.clone(), libc::SIGUSR2); }
-                }
+    fn run_migration(&self, mig_dest: Ipv4Addr) -> Result<()> {
+        let mut client = MigrationClient::connect(mig_dest)?;
 
-                let mut client = MigrationClient::connect(mig_dest).unwrap();
+        let mut meta = self.get_checkpoint_config()?;
+        meta.checkpoint_number = 0;
 
-                let meta = CheckpointConfig {
-                    num_cpus: self.num_cpus,
-                    mem_size: self.mem.len() as isize,
-                    checkpoint_number: 0,
-                    elf_entry: self.elf_entry.unwrap(),
-                    full: self.additional.full_checkpoint
-                };
+        client.send_data(unsafe { utils::any_as_u8_slice(&meta) })?;
 
-                client.send_data(unsafe { utils::any_as_u8_slice(&meta) });
+        debug!("Sent meta: {}", ::std::mem::size_of::<CheckpointConfig>());
 
-                self.control.barrier.wait();
+        client.send_data(self.mem.as_ref())?;
 
-                client.send_data(self.mem.as_ref());
+        debug!("Sent mem: {}", self.mem.len());
 
-                for cpu in &self.vcpus {
-                    let cpu_state = cpu.save_cpu_state().unwrap();
-                    client.send_data(unsafe { utils::any_as_u8_slice(&cpu_state) });
-                }
+        for cpu in &self.vcpus {
+            let cpu_state = cpu.save_cpu_state()?;
+            client.send_data(unsafe { utils::any_as_u8_slice(&cpu_state) })?;
+            debug!("Sent vcpu: {}", ::std::mem::size_of::<vcpu_state>());
+        }
 
-                if self.extensions.cap_adjust_clock_stable {
-                    let mut clock = kvm_clock_data::default();
-                    self.get_clock(&mut clock);
+        if self.extensions.cap_adjust_clock_stable {
+            let mut clock = kvm_clock_data::default();
+            self.get_clock(&mut clock)?;
 
-                    client.send_data(unsafe { utils::any_as_u8_slice(&clock) });
-                }
+            client.send_data(unsafe { utils::any_as_u8_slice(&clock) })?;
+            debug!("Sent clock: {}", ::std::mem::size_of::<kvm_clock_data>());
+        }
 
-                self.control.interrupt.store(false, Ordering::Relaxed);
-                self.control.barrier.wait();
+        Ok(())
+    }
 
+    fn handle_migration(&self, threads: &Vec<pthread::Pthread>) -> bool {
+        let mig_dest = match self.additional.migration_support {
+            Some(dest) => dest,
+            None => return true
+        };
+
+        self.control.interrupt.store(true, Ordering::Relaxed);
+        for thr in threads {
+            unsafe { libc::pthread_kill(*thr, libc::SIGUSR2); }
+        }
+
+        self.control.barrier.wait();
+
+        let ret = match self.run_migration(mig_dest) {
+            Ok(()) => {
+                println!("Successfully sent migration data");
                 false
             },
-            None => true
-        }
+            Err(e) => {
+                eprintln!("Failed to send migration data: {}", e);
+                true
+            }
+        };
+
+        self.control.interrupt.store(false, Ordering::Relaxed);
+        self.control.barrier.wait();
+
+        ret
     }
 
-    pub fn handle_signal(&self, sig: &Signal, threads: &Vec<pthread::Pthread>) -> bool {
+    fn handle_signal(&self, sig: &Signal, threads: &Vec<pthread::Pthread>) -> bool {
         match sig {
             Signal::INT | Signal::TERM => false,
             Signal::USR1 => self.handle_migration(threads),
@@ -635,10 +778,17 @@ impl VirtualMachine {
         let cp_tick = ::chan::tick_ms(1000);
         let threads = pthreads.clone();
 
+        let mut tick = 0;
+
         loop {
             chan_select! {
                 signal.recv() -> sig => if !self.handle_signal(&sig.unwrap(), &threads) { break },
-                cp_tick.recv() => self.handle_checkpoint(&threads),
+                cp_tick.recv() => {
+                    tick += 1;
+                    if self.additional.checkpoint > 0 && tick % self.additional.checkpoint == 0 {
+                        self.handle_checkpoint(&threads);
+                    }
+                },
                 rdone.recv() => break
             }
         }
@@ -654,20 +804,26 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub fn stop(&mut self) -> Result<i32> {
+    pub fn stop(&mut self) -> Result<()> {
         self.control.running.store(false, Ordering::Relaxed);
 
-        let mut reason = Ok(0);
+        let mut result = Ok(());
         while let Some(handle) = self.thread_handles.pop() {
             if let Ok(ret) = handle.join() {
                 match ret {
                     ExitCode::Innocent => continue,
-                    ExitCode::Cause(cause) => reason = cause
+                    ExitCode::Cause(cause) => match cause {
+                        Ok(code) => debug!("Thread has exited with code {}", code),
+                        Err(e) => {
+                            eprintln!("Thread error: {}", e);
+                            result = Err(Error::ThreadError)
+                        }
+                    }
                 }
             }
         }
 
-        reason
+        result
     }
 
     pub fn is_running(&mut self) -> Result<bool> {

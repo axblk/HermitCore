@@ -49,7 +49,8 @@ pub struct MigrationServer {
 
 impl MigrationServer {
     pub fn wait_for_incoming() -> Result<MigrationServer> {
-        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], MIGRATION_PORT))).unwrap();
+        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], MIGRATION_PORT)))
+            .map_err(|_| Error::MigrationConnection)?;
 
         match listener.incoming().next() {
             Some(stream) => {
@@ -60,6 +61,7 @@ impl MigrationServer {
 
                 let mut cfg = CheckpointConfig::default();
                 mig_server.recv_data(unsafe { utils::any_as_u8_mut_slice(&mut cfg) })?;
+                debug!("Received meta: {}", ::std::mem::size_of::<CheckpointConfig>());
                 mig_server.data.config = cfg;
 
                 Ok(mig_server)
@@ -72,6 +74,7 @@ impl MigrationServer {
         for _ in 0 .. self.data.config.get_num_cpus() {
             let mut cpu_state = vcpu_state::default();
             self.recv_data(unsafe { utils::any_as_u8_mut_slice(&mut cpu_state) })?;
+            debug!("Received cpu state: {}", ::std::mem::size_of::<vcpu_state>());
             self.data.cpu_states.push(cpu_state);
         }
         Ok(())
