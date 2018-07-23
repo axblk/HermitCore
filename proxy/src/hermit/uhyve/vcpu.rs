@@ -376,7 +376,7 @@ impl VirtualCPU {
 
     fn get_msrs(&self, msr: &mut kvm_msr_data) -> Result<()> {
         unsafe {
-            uhyve::ioctl::get_msrs(self.kvm_fd, (&mut msr.info) as *mut kvm_msrs)
+            uhyve::ioctl::get_msrs(self.vcpu_fd, (&mut msr.info) as *mut kvm_msrs)
                 .map_err(|_| Error::IOCTL(NameIOCTL::GetMSRS))?;
         }
 
