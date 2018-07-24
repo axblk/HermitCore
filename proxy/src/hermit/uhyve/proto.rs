@@ -1,7 +1,9 @@
 use libc::{write, read, lseek, open, close, strcpy, c_void, c_char};
 use super::kvm_header::*;
-use std::ffi::CString;
+use std::ffi::{CString, CStr};
 use std::env;
+use std::fs;
+use std::path::Path;
 
 use hermit::is_verbose;
 
@@ -177,8 +179,10 @@ impl Syscall {
                 return Ok(Return::Exit(*(guest_mem.offset((*obj).arg as isize)) as i32));
             },
             Syscall::Open(obj) => {
-                // TODO: protect kvm device
-                (*obj).ret = open(guest_mem.offset((*obj).name) as *const i8, (*obj).flags, (*obj).mode);
+                let name_ptr = guest_mem.offset((*obj).name) as *const i8;
+                let name = CStr::from_ptr(name_ptr).to_str().unwrap();
+                let kvm = fs::canonicalize(name).map(|path| path == Path::new("/dev/kvm")).unwrap_or(false);
+                (*obj).ret = if kvm { -1 } else { open(name_ptr, (*obj).flags, (*obj).mode) };
             },
             Syscall::Close(obj) => {
                 (*obj).ret = match (*obj).fd {
