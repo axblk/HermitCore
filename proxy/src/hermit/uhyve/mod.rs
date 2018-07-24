@@ -6,6 +6,8 @@ mod kvm;
 mod vcpu;
 mod vm;
 mod proto;
+mod network;
+mod net_if;
 
 pub mod migration;
 pub mod uhyve;

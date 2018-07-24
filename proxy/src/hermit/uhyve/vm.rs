@@ -33,6 +33,7 @@ use super::vcpu::{ExitCode, VirtualCPU, vcpu_state};
 use super::proto::PORT_UART;
 use super::checkpoint::{CheckpointConfig, FileCheckpoint};
 use super::migration::{MigrationServer, MigrationClient};
+use super::network::NetworkInterface;
 use super::gdt;
 
 // TODO configuration missing
@@ -873,17 +874,22 @@ impl VirtualMachine {
 
         let signal = ::chan_signal::notify(&[Signal::INT, Signal::TERM, Signal::USR1]);
 
+        let net_if = Arc::new(match &self.additional.netif {
+            Some(netif) => Some(NetworkInterface::new(self.vm_fd, netif, &self.additional.mac_addr)?),
+            None => None
+        });
+
         let mut pthreads = Vec::new();
 
         let rdone = {
-            let (handle, ptid, recv) = self.vcpus[0].run();
+            let (handle, ptid, recv) = self.vcpus[0].run(net_if.clone());
             self.thread_handles.push(handle);
             pthreads.push(ptid);
             recv
         };
 
         for vcpu in &mut self.vcpus[1..] {
-            let (handle, ptid, _) = vcpu.run();
+            let (handle, ptid, _) = vcpu.run(net_if.clone());
             self.thread_handles.push(handle);
             pthreads.push(ptid);
         }

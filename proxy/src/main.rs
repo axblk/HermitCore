@@ -9,10 +9,10 @@
 extern crate libc;
 extern crate memmap;
 extern crate elf;
-extern crate errno;
 extern crate inotify;
 extern crate byteorder;
 extern crate raw_cpuid;
+extern crate rand;
 
 #[macro_use]
 extern crate chan;

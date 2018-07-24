@@ -39,6 +39,7 @@ pub struct IsleParameterQEmu {
 #[derive(Debug, Clone)]
 pub struct IsleParameterUhyve {
     netif: Option<String>,
+    mac_addr: Option<String>,
     ip: Option<Ipv4Addr>,
     gateway: Option<Ipv4Addr>,
     mask: Option<Ipv4Addr>,
@@ -88,6 +89,7 @@ impl IsleParameter {
             },
             "uhyve" | "UHyve" | "UHYVE" => {
                 let netif = env::var("HERMIT_NETIF").map(|x| Some(x)).unwrap_or(None);
+                let mac_addr = env::var("HERMIT_NETIF_MAC").map(|x| Some(x)).unwrap_or(None);
                 let ip = IsleParameter::parse_ip("HERMIT_IP");
                 let gateway = IsleParameter::parse_ip("HERMIT_GATEWAY");
                 let mask = IsleParameter::parse_ip("HERMIT_MASK");
@@ -102,6 +104,7 @@ impl IsleParameter {
                     num_cpus: num_cpus,
                     additional: IsleParameterUhyve {
                         netif: netif,
+                        mac_addr: mac_addr,
                         ip: ip,
                         gateway: gateway,
                         mask: mask,

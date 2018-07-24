@@ -80,6 +80,8 @@ pub mod ioctl {
     ioctl_readwrite!(get_irqchip, KVMIO, 0x62, kvm_irqchip);
     ioctl_read!(set_irqchip, KVMIO, 0x63, kvm_irqchip);
 
+    ioctl_write_ptr!(irqfd, KVMIO, 0x76, kvm_irqfd);
+
     ioctl_write_ptr!(set_clock, KVMIO, 0x7b, kvm_clock_data);
     ioctl_read!(get_clock, KVMIO, 0x7c, kvm_clock_data);
 }

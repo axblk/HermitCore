@@ -2,12 +2,14 @@ use std::ffi::{CString, CStr};
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use libc::{write, read, lseek, open, close, strcpy, c_void, c_char};
 
 use hermit::error::*;
 use hermit::uhyve::kvm::*;
 use hermit::is_verbose;
+use super::network::NetworkInterface;
 
 const PORT_WRITE:   u16 = 0x400;
 const PORT_OPEN:    u16 = 0x440;
@@ -114,6 +116,9 @@ pub enum Syscall {
     Read(*mut Read),
     LSeek(*mut LSeek),
     Exit(*mut Exit),
+    NetInfo(*mut NetInfo),
+    NetWrite(*mut NetWrite),
+    NetRead(*mut NetRead),
     NetStat(*mut NetStat),
     CmdSize(*mut CmdSize),
     CmdVal(*mut CmdVal),
@@ -140,17 +145,21 @@ impl Syscall {
             }
 
             let offset = *(mem.offset(run.__bindgen_anon_1.io.data_offset as isize) as *const isize);
+            let ptr = guest_mem.offset(offset);
             Ok(match run.__bindgen_anon_1.io.port {
                 PORT_UART       => { Syscall::UART(offset as u8) },
-                PORT_WRITE      => { Syscall::Write(guest_mem.offset(offset) as *mut Write) },
-                PORT_READ       => { Syscall::Read (guest_mem.offset(offset) as *mut Read)  },
-                PORT_CLOSE      => { Syscall::Close(guest_mem.offset(offset) as *mut Close) },
-                PORT_OPEN       => { Syscall::Open (guest_mem.offset(offset) as *mut Open ) },
-                PORT_LSEEK      => { Syscall::LSeek(guest_mem.offset(offset) as *mut LSeek) },
-                PORT_EXIT       => { Syscall::Exit (guest_mem.offset(offset) as *mut Exit) },
-                PORT_NETSTAT    => { Syscall::NetStat(guest_mem.offset(offset) as *mut NetStat) },
-                PORT_CMDSIZE    => { Syscall::CmdSize(guest_mem.offset(offset) as *mut CmdSize) },
-                PORT_CMDVAL     => { Syscall::CmdVal(guest_mem.offset(offset) as *mut CmdVal) },
+                PORT_WRITE      => { Syscall::Write(ptr as *mut Write) },
+                PORT_READ       => { Syscall::Read (ptr as *mut Read)  },
+                PORT_CLOSE      => { Syscall::Close(ptr as *mut Close) },
+                PORT_OPEN       => { Syscall::Open (ptr as *mut Open ) },
+                PORT_LSEEK      => { Syscall::LSeek(ptr as *mut LSeek) },
+                PORT_EXIT       => { Syscall::Exit (ptr as *mut Exit) },
+                PORT_NETINFO    => { Syscall::NetInfo(ptr as *mut NetInfo) },
+                PORT_NETWRITE   => { Syscall::NetWrite(ptr as *mut NetWrite) },
+                PORT_NETREAD    => { Syscall::NetRead(ptr as *mut NetRead) },
+                PORT_NETSTAT    => { Syscall::NetStat(ptr as *mut NetStat) },
+                PORT_CMDSIZE    => { Syscall::CmdSize(ptr as *mut CmdSize) },
+                PORT_CMDVAL     => { Syscall::CmdVal(ptr as *mut CmdVal) },
                 _ => {
                     let err = format!("KVM: unhandled KVM_EXIT_IO at port {:#x}, direction {}",
                         run.__bindgen_anon_1.io.port, run.__bindgen_anon_1.io.direction);
@@ -160,7 +169,7 @@ impl Syscall {
         }
     }
 
-    pub unsafe fn run(&self, guest_mem: *mut u8) -> Result<Return> {
+    pub unsafe fn run(&self, guest_mem: *mut u8, net_if: &Arc<Option<NetworkInterface>>) -> Result<Return> {
         match *self {
             Syscall::UART(obj) => {
                 if is_verbose() {
@@ -193,9 +202,49 @@ impl Syscall {
             Syscall::LSeek(obj) => {
                 (*obj).offset = lseek((*obj).fd, (*obj).offset, (*obj).whence);
             },
+            Syscall::NetInfo(obj) => {
+                println!("info");
+                if net_if.is_some() {
+                    match Option::as_ref(&net_if) {
+                        Some(net) => {
+                            (*obj).mac_str.copy_from_slice(net.get_mac());
+                        },
+                        None => {}
+                    }
+                }
+            },
+            Syscall::NetWrite(obj) => {
+                let netfd = match Option::as_ref(&net_if) {
+                    Some(net) => net.get_netfd(),
+                    None => -1
+                };
+                let ret = write(netfd, guest_mem.offset((*obj).data) as *const c_void, (*obj).len);
+                if ret >= 0 {
+                    (*obj).ret = 0;
+                    (*obj).len = ret as usize;
+                } else {
+                    (*obj).ret = -1;
+                }
+            },
+            Syscall::NetRead(obj) => {
+                let netfd = match Option::as_ref(&net_if) {
+                    Some(net) => net.get_netfd(),
+                    None => -1
+                };
+                let ret = read(netfd, guest_mem.offset((*obj).data) as *mut c_void, (*obj).len);
+                if ret >= 0 {
+                    (*obj).ret = 0;
+                    (*obj).len = ret as usize;
+                } else {
+                    (*obj).ret = -1;
+                    match Option::as_ref(&net_if) {
+                        Some(net) => net.notify(),
+                        None => {}
+                    }
+                }
+            },
             Syscall::NetStat(obj) => {
-                // TODO
-                (*obj).status = 0;
+                (*obj).status = net_if.is_some() as i32;
             },
             Syscall::CmdSize(obj) => {
                 (*obj).argc = env::args().count() as i32 - 1;

@@ -21,6 +21,7 @@ use hermit::uhyve::kvm::*;
 use hermit::error::*;
 use super::proto;
 use super::vm::{KVMExtensions, ControlData};
+use super::network::NetworkInterface;
 use super::utils;
 
 pub const CPUID_FUNC_PERFMON: u32 = 0x0A;
@@ -110,7 +111,7 @@ impl VirtualCPU {
         mem::forget(file);
 
         unsafe {
-            let ref mut run = *(run_mem.as_mut_ptr() as *mut kvm_run);
+            let mut run = *(run_mem.as_mut_ptr() as *mut kvm_run);
             run.apic_base = APIC_DEFAULT_BASE as u64;
         }
 
@@ -415,7 +416,7 @@ impl VirtualCPU {
         Ok(())
     }
 
-    pub fn single_run(fd: RawFd, id: u32, state: &SharedState) -> Result<proto::Return> {
+    pub fn single_run(fd: RawFd, id: u32, state: &SharedState, net_if: &Arc<Option<NetworkInterface>>) -> Result<proto::Return> {
         let ret = unsafe { uhyve::ioctl::run(fd, ptr::null_mut()) };
 
         //debug!("Single Run CPU {}", id);
@@ -435,7 +436,7 @@ impl VirtualCPU {
         }
 
         unsafe {
-            let res = proto::Syscall::from_mem(state.run_mem.as_ptr(), state.guest_mem)?.run(state.guest_mem);
+            let res = proto::Syscall::from_mem(state.run_mem.as_ptr(), state.guest_mem)?.run(state.guest_mem, net_if);
             if let Err(e) = &res {
                 match e {
                     Error::KVMDebug => { let _ = VirtualCPU::print_registers(id, fd); },
@@ -447,7 +448,7 @@ impl VirtualCPU {
         }
     }
 
-    pub fn run_vcpu(state: SharedState, id: u32, fd: RawFd) -> ExitCode {
+    pub fn run_vcpu(state: SharedState, id: u32, fd: RawFd, net_if: Arc<Option<NetworkInterface>>) -> ExitCode {
         unsafe {
             while volatile_load(state.mboot.offset(0x20)) < id as u8 {
                 thread::yield_now();
@@ -477,7 +478,7 @@ impl VirtualCPU {
         let oldset = newset.thread_swap_mask(signal::SigmaskHow::SIG_BLOCK).unwrap();
 
         while state.control.running.load(Ordering::Relaxed) {
-            match VirtualCPU::single_run(fd, id, &state) {
+            match VirtualCPU::single_run(fd, id, &state, &net_if) {
                 Ok(proto::Return::Interrupt) => {
                     debug!("Interrupted {}", id);
                     if state.control.interrupt.load(Ordering::Relaxed) {
@@ -505,7 +506,7 @@ impl VirtualCPU {
         ExitCode::Innocent
     }
 
-    pub fn run(&mut self) -> (JoinHandle<ExitCode>, pthread::Pthread, ::chan::Receiver<()>) {
+    pub fn run(&mut self, net_if: Arc<Option<NetworkInterface>>) -> (JoinHandle<ExitCode>, pthread::Pthread, ::chan::Receiver<()>) {
         debug!("Run CPU {}", self.id);
 
         let state = self.state.take().unwrap();
@@ -517,7 +518,7 @@ impl VirtualCPU {
 
         let handle = thread::spawn(move || {
             let _ = spthread.send(pthread::pthread_self());
-            let ret = VirtualCPU::run_vcpu(state, id, fd);
+            let ret = VirtualCPU::run_vcpu(state, id, fd, net_if);
             sdone.send(());
             ret
         });

@@ -1,5 +1,5 @@
 use std::{result, fmt};
-use errno::errno;
+use nix::errno;
 
 pub type Result<T> = result::Result<T, Error>;
 
@@ -34,7 +34,8 @@ pub enum Error {
     TranslationFault(u64),
     KVMRunFailed(u32),
     KVMDebug,
-    ThreadError
+    ThreadError,
+    NetworkInterface
 }
 
 impl fmt::Display for Error {
@@ -44,7 +45,7 @@ impl fmt::Display for Error {
             Error::InternalError => write!(f, "An internal error has occurred, please report."),
             Error::NotEnoughMemory => write!(f, "The host system has not enough memory, please check your memory usage."),
             Error::InvalidFile(ref file) => write!(f, "The file {} was not found or is invalid.", file),
-            Error::IOCTL(ref name) => write!(f, "The IOCTL command {:?} has failed: {}", name, errno()),
+            Error::IOCTL(ref name) => write!(f, "The IOCTL command {:?} has failed: {}", name, errno::from_i32(errno::errno())),
             Error::KernelNotLoaded => write!(f, "Please load the kernel before you start the virtual machine."),
             Error::MissingFrequency => write!(f, "Couldn't get the CPU frequency from your system. (is /proc/cpuinfo missing?)"),
             Error::MultiIsleFailed => write!(f, "The Multi isle was selected on a system without support, please load the kernel driver."),
@@ -69,7 +70,8 @@ impl fmt::Display for Error {
             Error::TranslationFault(rip) => write!(f, "KVM: host/guest translation fault: rip={:#x}", rip),
             Error::KVMRunFailed(cpuid) => write!(f, "KVM: ioctl KVM_RUN in vcpu_loop for cpuid {} failed", cpuid),
             Error::KVMDebug => write!(f, "KVM: debug"),
-            Error::ThreadError => write!(f, "KVM: thread failed")
+            Error::ThreadError => write!(f, "KVM: thread failed"),
+            Error::NetworkInterface => write!(f, "Network failed"),
         }
     }
 }
@@ -116,5 +118,6 @@ pub enum NameIOCTL {
     SetXSave,
     GetXCRS,
     SetXCRS,
-    SetSignalMask
+    SetSignalMask,
+    IRQFD
 }
