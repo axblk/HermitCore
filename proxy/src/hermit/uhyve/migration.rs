@@ -4,7 +4,8 @@ use std::io::{Read, Write};
 
 use hermit::utils;
 use hermit::error::*;
-use super::checkpoint::{CheckpointData, CheckpointConfig, vcpu_state};
+use super::checkpoint::{CheckpointData, CheckpointConfig};
+use super::vcpu::vcpu_state;
 
 pub const MIGRATION_PORT: u16 = 1337;
 

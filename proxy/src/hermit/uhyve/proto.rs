@@ -1,13 +1,13 @@
-use libc::{write, read, lseek, open, close, strcpy, c_void, c_char};
-use super::kvm_header::*;
 use std::ffi::{CString, CStr};
 use std::env;
 use std::fs;
 use std::path::Path;
 
-use hermit::is_verbose;
+use libc::{write, read, lseek, open, close, strcpy, c_void, c_char};
 
-use super::{Error, Result};
+use hermit::error::*;
+use hermit::uhyve::kvm::*;
+use hermit::is_verbose;
 
 const PORT_WRITE:   u16 = 0x400;
 const PORT_OPEN:    u16 = 0x440;
@@ -128,7 +128,7 @@ pub enum Return {
 }
 
 impl Syscall {
-    pub fn from_mem(mem: *const u8, guest_mem: *const u8) -> Result<Syscall> {
+    pub fn from_mem(mem: *const u8, guest_mem: *mut u8) -> Result<Syscall> {
         unsafe {
             let ref run = *(mem as *const kvm_run);
 
@@ -139,7 +139,7 @@ impl Syscall {
                 return Ok(Syscall::Other(mem as *const kvm_run));
             }
 
-            let offset = *((mem.offset(run.__bindgen_anon_1.io.data_offset as isize) as *const isize));
+            let offset = *(mem.offset(run.__bindgen_anon_1.io.data_offset as isize) as *const isize);
             Ok(match run.__bindgen_anon_1.io.port {
                 PORT_UART       => { Syscall::UART(offset as u8) },
                 PORT_WRITE      => { Syscall::Write(guest_mem.offset(offset) as *mut Write) },

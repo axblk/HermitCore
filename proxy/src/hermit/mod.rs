@@ -9,9 +9,10 @@ pub mod uhyve;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::io::{BufReader, BufRead};
-use inotify::{Inotify, WatchMask};
 use std::env;
 use std::net::Ipv4Addr;
+
+use inotify::{Inotify, WatchMask};
 
 use hermit::error::*;
 use hermit::uhyve::migration::MigrationType;

@@ -5,17 +5,16 @@ use std::io;
 use std::mem;
 use std::ffi::CStr;
 use std::{thread, time};
+
 use byteorder::{WriteBytesExt, NativeEndian};
+use nix::unistd::{write, read};
+use nix::fcntl::{open, OFlag};
+use nix::sys::stat::Mode;
+use libc;
 
 use hermit::proto;
 use hermit::proto::Packet;
 use hermit::error::{Error, Result};
-
-use nix::unistd::{write, read};
-use nix::fcntl::{open, OFlag};
-use nix::sys::stat::Mode;
-
-use libc;
 
 const HERMIT_MAGIC: u32 = 0x7E317;
 

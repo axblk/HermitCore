@@ -2,15 +2,13 @@
 mod checkpoint;
 mod gdt;
 mod utils;
-pub mod kvm_header;
-pub mod uhyve;
-pub mod vcpu;
-pub mod vm;
-pub mod proto;
+mod kvm;
+mod vcpu;
+mod vm;
+mod proto;
+
 pub mod migration;
+pub mod uhyve;
 
 // reexport Uhyve to show up in the root namespace of our module
 pub use self::uhyve::*;
-
-// reexport the Error enum and Result type
-pub use hermit::error::*;

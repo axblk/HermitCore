@@ -1,10 +1,6 @@
 //! By calling create_vm KVM returns a fd, this file wraps all relevant functions belonging to the
 //! VM layer
 
-use libc;
-use memmap::{Mmap, MmapMut};
-use elf;
-use elf::types::{ELFCLASS64, OSABI, PT_LOAD, ET_EXEC, EM_X86_64};
 use std::io::Cursor;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,9 +9,16 @@ use std::thread::JoinHandle;
 use std::ptr;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::net::Ipv4Addr;
+use std::mem;
+use std::rc::Rc;
 
+use libc;
+use memmap::{Mmap, MmapMut};
+use elf;
+use elf::types::{ELFCLASS64, OSABI, PT_LOAD, ET_EXEC, EM_X86_64};
 use byteorder::{ReadBytesExt, NativeEndian};
 use chan_signal::Signal;
 use nix::sys::pthread;
@@ -24,13 +27,54 @@ use hermit::is_verbose;
 use hermit::IsleParameterUhyve;
 use hermit::utils;
 use hermit::uhyve;
-use super::kvm_header::*;
-use super::{Result, Error, NameIOCTL};
-use super::vcpu::{ExitCode, VirtualCPU};
+use hermit::error::*;
+use super::kvm::*;
+use super::vcpu::{ExitCode, VirtualCPU, vcpu_state};
 use super::proto::PORT_UART;
-use super::checkpoint::{CheckpointConfig, FileCheckpoint, vcpu_state};
+use super::checkpoint::{CheckpointConfig, FileCheckpoint};
 use super::migration::{MigrationServer, MigrationClient};
+use super::gdt;
 
+// TODO configuration missing
+pub const GUEST_SIZE: usize = 0x20000000;
+pub const GUEST_PAGE_SIZE: usize = 0x200000;
+
+pub const BOOT_GDT:  usize = 0x1000;
+pub const BOOT_INFO: usize = 0x2000;
+pub const BOOT_PML4: usize = 0x10000;
+pub const BOOT_PDPTE:usize = 0x11000;
+pub const BOOT_PDE:  usize = 0x12000;
+
+/// Basic CPU control in CR0
+pub const X86_CR0_PE: u64 = (1 << 0);
+pub const X86_CR0_PG: u64 = (1 << 31);
+
+/// Intel long mode page directory/table entries
+pub const X86_CR4_PAE: u64 = (1u64 << 5);
+
+/// Intel long mode page directory/table entries
+pub const X86_PDPT_P:  u64 = (1 << 0);
+pub const X86_PDPT_RW: u64 = (1 << 1);
+pub const X86_PDPT_PS: u64 = (1 << 7);
+
+/// EFER bits:
+pub const _EFER_SCE:    u64 = 0;  /* SYSCALL/SYSRET */
+pub const _EFER_LME:    u64 = 8;  /* Long mode enable */
+pub const _EFER_LMA:    u64 = 10; /* Long mode active (read-only) */
+pub const _EFER_NX:     u64 = 11; /* No execute enable */
+pub const _EFER_SVME:   u64 = 12; /* Enable virtualization */
+pub const _EFER_LMSLE:  u64 = 13; /* Long Mode Segment Limit Enable */
+pub const _EFER_FFXSR:  u64 = 14; /* Enable Fast FXSAVE/FXRSTOR */
+
+pub const EFER_SCE:     u64 = (1<<_EFER_SCE);
+pub const EFER_LME:     u64 = (1<<_EFER_LME);
+pub const EFER_LMA:     u64 = (1<<_EFER_LMA);
+pub const EFER_NX:      u64 = (1<<_EFER_NX);
+pub const EFER_SVME:    u64 = (1<<_EFER_SVME);
+pub const EFER_LMSLE:   u64 = (1<<_EFER_LMSLE);
+pub const EFER_FFXSR:   u64 = (1<<_EFER_FFXSR);
+
+///
 pub const KVM_32BIT_MAX_MEM_SIZE:   usize = 1 << 32;
 pub const KVM_32BIT_GAP_SIZE:       usize = 768 << 20;
 pub const KVM_32BIT_GAP_START:      usize = KVM_32BIT_MAX_MEM_SIZE - KVM_32BIT_GAP_SIZE;
@@ -98,15 +142,14 @@ pub struct ControlData {
 }
 
 pub struct VirtualMachine {
-    kvm_fd: libc::c_int,
-    vm_fd: libc::c_int,
+    kvm: Rc<uhyve::KVM>,
+    vm_fd: RawFd,
     mem: MmapMut,
     elf_entry: Option<u64>,
     klog: Option<*const i8>,
     mboot: Option<*mut u8>,
     vcpus: Vec<VirtualCPU>,
     num_cpus: u32,
-    sregs: kvm_sregs,
     control: Arc<ControlData>,
     thread_handles: Vec<JoinHandle<ExitCode>>,
     extensions: KVMExtensions,
@@ -114,13 +157,8 @@ pub struct VirtualMachine {
     checkpoint_num: u32
 }
 
-fn determine_dest_offset(src_addr: isize) -> isize {
-    let mask = if src_addr & PG_PSE as isize != 0 { PAGE_2M_MASK } else { PAGE_MASK };
-	src_addr & mask as isize
-}
-
 impl VirtualMachine {
-    pub fn new(kvm_fd: libc::c_int, fd: libc::c_int, size: usize, num_cpus: u32, add: IsleParameterUhyve) -> Result<VirtualMachine> {
+    pub fn new(kvm: Rc<uhyve::KVM>, vm_fd: RawFd, size: usize, num_cpus: u32, add: IsleParameterUhyve) -> Result<VirtualMachine> {
         debug!("New virtual machine with memory size {}", size);
 
         // create a new memory region to map the memory of our guest
@@ -142,15 +180,14 @@ impl VirtualMachine {
         };
         
         Ok(VirtualMachine {
-            kvm_fd: kvm_fd,
-            vm_fd: fd,
+            kvm: kvm,
+            vm_fd: vm_fd,
             mem: mem,
             elf_entry: None,
             klog: None,
             vcpus: Vec::new(),
             mboot: None,
             num_cpus: num_cpus,
-            sregs: kvm_sregs::default(),
             control: Arc::new(control),
             thread_handles: Vec::new(),
             extensions: KVMExtensions::default(),
@@ -297,7 +334,8 @@ impl VirtualMachine {
 
             while let Ok(location) = file.read_i64::<NativeEndian>() {
                 let location = location as isize;
-                let dest_addr = unsafe { self.mem.as_mut_ptr().offset(determine_dest_offset(location)) };
+                let mask = if location & PG_PSE as isize != 0 { PAGE_2M_MASK } else { PAGE_MASK };
+                let dest_addr = unsafe { self.mem.as_mut_ptr().offset(location & mask as isize) };
                 let len = if location & PG_PSE as isize != 0 { 1 << PAGE_2M_BITS } else { 1 << PAGE_BITS };
                 let dest = unsafe { ::std::slice::from_raw_parts_mut(dest_addr, len) };
                 file.read_exact(dest).map_err(|_| Error::InvalidFile(file_name.clone()))?;
@@ -426,17 +464,93 @@ impl VirtualMachine {
         Ok(())
     }
 
+    pub fn init_sregs(&mut self, mut sregs: &mut kvm_sregs) -> Result<()> {
+        debug!("Setup GDT");
+        self.setup_system_gdt(&mut sregs, 0)?;
+        debug!("Setup the page tables");
+        self.setup_system_page_tables(&mut sregs)?;
+        debug!("Set the system to 64bit");
+        self.setup_system_64bit(&mut sregs)?;
+
+        Ok(())
+    }
+
+    pub fn setup_system_gdt(&mut self, sregs: &mut kvm_sregs, offset: u64) -> Result<()> {
+        let (mut data_seg, mut code_seg) = (kvm_segment::default(), kvm_segment::default());               
+
+        // create the GDT entries
+        let gdt_null = gdt::Entry::new(0, 0, 0);
+        let gdt_code = gdt::Entry::new(0xA09B, 0, 0xFFFFF);
+        let gdt_data = gdt::Entry::new(0xC093, 0, 0xFFFFF);
+
+        // apply the new GDTs to our guest memory
+        unsafe {
+            let mem = self.mem.as_mut_ptr();
+            let ptr = mem.offset(offset as isize) as *mut u64;
+            
+            *(ptr.offset(gdt::BOOT_NULL)) = gdt_null.as_u64();
+            *(ptr.offset(gdt::BOOT_CODE)) = gdt_code.as_u64();
+            *(ptr.offset(gdt::BOOT_DATA)) = gdt_data.as_u64();
+        }
+
+        gdt_code.apply_to_kvm(gdt::BOOT_CODE, &mut code_seg);
+        gdt_data.apply_to_kvm(gdt::BOOT_DATA, &mut data_seg);
+
+        sregs.gdt.base = offset;
+        sregs.gdt.limit = ((mem::size_of::<u64>() * gdt::BOOT_MAX) - 1) as u16;
+        sregs.cs = code_seg;
+        sregs.ds = data_seg;
+        sregs.es = data_seg;
+        sregs.fs = data_seg;
+        sregs.gs = data_seg;
+        sregs.ss = data_seg;
+
+        Ok(())
+    }
+
+    pub fn setup_system_page_tables(&mut self, sregs: &mut kvm_sregs) -> Result<()> {
+        unsafe {
+            let mem = self.mem.as_mut_ptr();
+            let pml4 = mem.offset(BOOT_PML4 as isize) as *mut u64;
+            let pdpte = mem.offset(BOOT_PDPTE as isize) as *mut u64;
+            let pde = mem.offset(BOOT_PDE as isize) as *mut u64;
+            
+            libc::memset(pml4 as *mut libc::c_void, 0x00, 4096);
+            libc::memset(pdpte as *mut libc::c_void, 0x00, 4096);
+            libc::memset(pde as *mut libc::c_void, 0x00, 4096);
+            
+            *pml4 = (BOOT_PDPTE as u64) | (X86_PDPT_P | X86_PDPT_RW);
+            *pdpte = (BOOT_PDE as u64) | (X86_PDPT_P | X86_PDPT_RW);
+           
+            for i in 0..(GUEST_SIZE/GUEST_PAGE_SIZE) {
+                *(pde.offset(i as isize)) = (i*GUEST_PAGE_SIZE) as u64 | (X86_PDPT_P | X86_PDPT_RW | X86_PDPT_PS);
+            }
+        }
+
+        sregs.cr3 = BOOT_PML4 as u64;
+        sregs.cr4 |= X86_CR4_PAE;
+        sregs.cr0 |= X86_CR0_PG;
+
+        Ok(())
+    }
+
+    pub fn setup_system_64bit(&self, sregs: &mut kvm_sregs) -> Result<()> {
+        sregs.cr0 |= X86_CR0_PE;
+        sregs.cr4 |= X86_CR4_PAE;
+        sregs.efer |= EFER_LME|EFER_LMA;
+
+        Ok(())
+    }
+
     pub fn init_cpus(&mut self) -> Result<()> {
         let entry = self.elf_entry.ok_or(Error::KernelNotLoaded)?;
 
+        let mut sregs = self.vcpus[0].get_sregs()?;
+        self.init_sregs(&mut sregs)?;
+
         for cpu in &self.vcpus {
             cpu.init(entry)?;
-
-            if cpu.get_id() == 0 {
-                self.sregs = cpu.init_sregs()?;
-            }
-
-            cpu.set_sregs(self.sregs)?;
+            cpu.set_sregs(sregs)?;
         }
 
         Ok(())
@@ -537,7 +651,11 @@ impl VirtualMachine {
     }
 
     pub fn create_vcpu(&mut self, id: u32) -> Result<()> {
-        let cpu = VirtualCPU::new(self.kvm_fd, self.vm_fd, id, &mut self.mem, self.mboot.unwrap(), self.control.clone(), self.extensions.clone())?;
+        let vcpu_fd = unsafe { uhyve::ioctl::create_vcpu(self.vm_fd, id as i32)
+            .map_err(|_| Error::IOCTL(NameIOCTL::CreateVcpu))? };
+        let mmap_size = self.kvm.get_mmap_size()?;
+        let cpu = VirtualCPU::new(self.kvm.clone(), vcpu_fd, id, mmap_size,
+            &mut self.mem, self.mboot.unwrap(), self.control.clone(), self.extensions.clone())?;
         self.vcpus.insert(id as usize, cpu);
 
         Ok(())
@@ -750,8 +868,6 @@ impl VirtualMachine {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        //let mut guest_mem = unsafe { self.mem.as_mut_slice() };
-       
         unsafe { *(self.mboot.unwrap().offset(0x24) as *mut u32) = self.num_cpus; }
         self.control.running.store(true, Ordering::Relaxed);
 
@@ -766,7 +882,7 @@ impl VirtualMachine {
             recv
         };
 
-        for vcpu in &self.vcpus[1..] {
+        for vcpu in &mut self.vcpus[1..] {
             let (handle, ptid, _) = vcpu.run();
             self.thread_handles.push(handle);
             pthreads.push(ptid);

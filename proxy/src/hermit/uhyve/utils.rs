@@ -1,6 +1,6 @@
 use std::fmt;
 
-use hermit::uhyve::kvm_header::*;
+use hermit::uhyve::kvm::*;
 
 impl fmt::Display for kvm_regs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

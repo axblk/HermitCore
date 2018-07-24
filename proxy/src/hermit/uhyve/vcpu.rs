@@ -1,5 +1,3 @@
-use libc;
-use libc::c_void;
 use std::mem;
 use std::ptr;
 use std::fs::File;
@@ -9,6 +7,7 @@ use std::thread;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::sync::atomic::Ordering;
+use std::rc::Rc;
 
 use nix::sys::signal;
 use nix::sys::pthread;
@@ -18,37 +17,13 @@ use nix;
 use memmap::{MmapMut, MmapOptions};
 
 use hermit::uhyve;
-use hermit::uhyve::kvm_header::*;
-use super::{Result, Error, NameIOCTL};
-use super::gdt;
+use hermit::uhyve::kvm::*;
+use hermit::error::*;
 use super::proto;
-use super::checkpoint::vcpu_state;
 use super::vm::{KVMExtensions, ControlData};
 use super::utils;
 
 pub const CPUID_FUNC_PERFMON: u32 = 0x0A;
-pub const GUEST_PAGE_SIZE: usize = 0x200000;
-
-// TODO configuration missing
-pub const GUEST_SIZE: usize = 0x20000000;
-
-pub const BOOT_GDT:  usize = 0x1000;
-pub const BOOT_INFO: usize = 0x2000;
-pub const BOOT_PML4: usize = 0x10000;
-pub const BOOT_PDPTE:usize = 0x11000;
-pub const BOOT_PDE:  usize = 0x12000;
-
-/// Basic CPU control in CR0
-pub const X86_CR0_PE: u64 = (1 << 0);
-pub const X86_CR0_PG: u64 = (1 << 31);
-
-/// Intel long mode page directory/table entries
-pub const X86_CR4_PAE: u64 = (1u64 << 5);
-
-/// Intel long mode page directory/table entries
-pub const X86_PDPT_P:  u64 = (1 << 0);
-pub const X86_PDPT_RW: u64 = (1 << 1);
-pub const X86_PDPT_PS: u64 = (1 << 7);
 
 /* x86-64 specific MSRs */
 pub const MSR_EFER:		            u32 = 0xc0000080; /* extended feature register */
@@ -83,26 +58,22 @@ pub const MSR_IA32_APICBASE_BASE:   u32 = 0xfffff<<12;
 pub const MSR_IA32_MISC_ENABLE:     u32 = 0x000001a0;
 pub const MSR_IA32_TSC:             u32 = 0x00000010;
 
-
-/// EFER bits:
-pub const _EFER_SCE:    u64 = 0;  /* SYSCALL/SYSRET */
-pub const _EFER_LME:    u64 = 8;  /* Long mode enable */
-pub const _EFER_LMA:    u64 = 10; /* Long mode active (read-only) */
-pub const _EFER_NX:     u64 = 11; /* No execute enable */
-pub const _EFER_SVME:   u64 = 12; /* Enable virtualization */
-pub const _EFER_LMSLE:  u64 = 13; /* Long Mode Segment Limit Enable */
-pub const _EFER_FFXSR:  u64 = 14; /* Enable Fast FXSAVE/FXRSTOR */
-
-pub const EFER_SCE:     u64 = (1<<_EFER_SCE);
-pub const EFER_LME:     u64 = (1<<_EFER_LME);
-pub const EFER_LMA:     u64 = (1<<_EFER_LMA);
-pub const EFER_NX:      u64 = (1<<_EFER_NX);
-pub const EFER_SVME:    u64 = (1<<_EFER_SVME);
-pub const EFER_LMSLE:   u64 = (1<<_EFER_LMSLE);
-pub const EFER_FFXSR:   u64 = (1<<_EFER_FFXSR);
-
 pub const IOAPIC_DEFAULT_BASE:  u32 = 0xfec00000;
 pub const APIC_DEFAULT_BASE:    u32 = 0xfee00000;
+
+#[repr(C)]
+#[derive(Default)]
+pub struct vcpu_state {
+	pub msr_data: kvm_msr_data,
+	pub regs: kvm_regs,
+	pub sregs: kvm_sregs,
+	pub fpu: kvm_fpu,
+	pub lapic: kvm_lapic_state,
+	pub xsave: kvm_xsave,
+	pub xcrs: kvm_xcrs,
+	pub events: kvm_vcpu_events,
+	pub mp_state: kvm_mp_state,
+}
 
 pub enum ExitCode {
     Cause(Result<i32>),
@@ -117,46 +88,22 @@ pub struct SharedState {
 }
 
 pub struct VirtualCPU {
+    kvm: Rc<uhyve::KVM>,
     id: u32,
-    kvm_fd: RawFd,
-    vm_fd: RawFd,
     vcpu_fd: RawFd,
-    state: Arc<SharedState>,
+    state: Option<SharedState>,
     extensions: KVMExtensions
 }
 
-#[repr(C)]
-struct kvm_cpuid2_data {
-    header: kvm_cpuid2,
-    data: [kvm_cpuid_entry2; 100]
-}
-
-#[repr(C)]
-#[derive(Default)]
-pub struct kvm_msr_data {
-	info: kvm_msrs,
-	entries: [kvm_msr_entry; 25]
-}
-
-#[repr(C)]
-pub struct kvm_signal_mask_data {
-	info: kvm_signal_mask,
-	sigset: libc::sigset_t
-}
-
-extern "C" fn empty_handler(_: libc::c_int) {}
+extern "C" fn empty_handler(_: i32) {}
 
 impl VirtualCPU {
-    pub fn new(kvm_fd: RawFd, vm_fd: RawFd, id: u32, mem: &mut MmapMut, mboot: *mut u8, control: Arc<ControlData>, extensions: KVMExtensions) -> Result<VirtualCPU> {
+    pub fn new(kvm: Rc<uhyve::KVM>, vcpu_fd: RawFd, id: u32, mmap_size: usize, mem: &mut MmapMut,
+        mboot: *mut u8, control: Arc<ControlData>, extensions: KVMExtensions) -> Result<VirtualCPU> {
+        debug!("New virtual CPU with id {} and FD {}", id, vcpu_fd);
 
-        // create a new VCPU and save the file descriptor
-        let fd = VirtualCPU::create_vcpu(vm_fd, id as i32)?;
-        debug!("New virtual CPU with id {} and FD {}", id, fd);
-
-        let file = unsafe { File::from_raw_fd(fd) };
-
-        let size = VirtualCPU::get_mmap_size(kvm_fd)?;
-        let mut run_mem = unsafe { MmapOptions::new().len(size).map_mut(&file) }
+        let file = unsafe { File::from_raw_fd(vcpu_fd) };
+        let mut run_mem = unsafe { MmapOptions::new().len(mmap_size).map_mut(&file) }
             .map_err(|_| Error::NotEnoughMemory)?;
       
         // forget the file, we don't want to close the file descriptor
@@ -175,14 +122,13 @@ impl VirtualCPU {
         };
 
         let cpu = VirtualCPU {
-            kvm_fd: kvm_fd, 
-            vm_fd: vm_fd, 
-            vcpu_fd: fd, 
-            id: id, 
-            state: Arc::new(state),
+            kvm: kvm,
+            vcpu_fd: vcpu_fd,
+            id: id,
+            state: Some(state),
             extensions: extensions
         };
-        
+
         Ok(cpu)
     }
 
@@ -270,19 +216,12 @@ impl VirtualCPU {
         Ok(cpu_state)
     }
 
-    pub fn print_registers(id: u32, vcpu_fd: i32) -> Result<()> {
+    pub fn print_registers(id: u32, vcpu_fd: RawFd) -> Result<()> {
         utils::show_registers(id, &VirtualCPU::get_regs_fd(vcpu_fd)?, &VirtualCPU::get_sregs_fd(vcpu_fd)?);
         Ok(())
     }
 
-    fn create_vcpu(fd: RawFd, id: i32) -> Result<RawFd> {
-        unsafe {
-            uhyve::ioctl::create_vcpu(fd, id)
-                .map_err(|_| Error::IOCTL(NameIOCTL::CreateVcpu))
-        }
-    }   
-
-    fn get_sregs_fd(vcpu_fd: i32) -> Result<kvm_sregs> {
+    fn get_sregs_fd(vcpu_fd: RawFd) -> Result<kvm_sregs> {
         let mut sregs = kvm_sregs::default();
         unsafe {
             uhyve::ioctl::get_sregs(vcpu_fd, (&mut sregs) as *mut kvm_sregs)
@@ -292,7 +231,7 @@ impl VirtualCPU {
         Ok(sregs)
     }
 
-    fn get_sregs(&self) -> Result<kvm_sregs> {
+    pub fn get_sregs(&self) -> Result<kvm_sregs> {
         VirtualCPU::get_sregs_fd(self.vcpu_fd)
     }
 
@@ -305,7 +244,7 @@ impl VirtualCPU {
         Ok(())
     }
 
-    fn get_regs_fd(vcpu_fd: i32) -> Result<kvm_regs> {
+    fn get_regs_fd(vcpu_fd: RawFd) -> Result<kvm_regs> {
         let mut regs = kvm_regs::default();
         unsafe {
             uhyve::ioctl::get_regs(vcpu_fd, (&mut regs) as *mut kvm_regs)
@@ -328,18 +267,6 @@ impl VirtualCPU {
         Ok(())
     }
 
-    fn get_supported_cpuid(&self) -> Result<kvm_cpuid2_data> {
-        let mut cpuid = kvm_cpuid2_data { header: kvm_cpuid2::default(), data: [kvm_cpuid_entry2::default();100] };
-        cpuid.header.nent = 100;
-
-        unsafe {
-            uhyve::ioctl::get_supported_cpuid(self.kvm_fd, (&mut cpuid.header) as *mut kvm_cpuid2)
-                .map_err(|_| Error::IOCTL(NameIOCTL::GetSupportedCpuID))?;
-        }
-
-        Ok(cpuid)
-    }
-
     fn set_cpuid2(&self, mut cpuid: kvm_cpuid2_data) -> Result<()> {
         unsafe {
             uhyve::ioctl::set_cpuid2(self.vcpu_fd, (&mut cpuid.header) as *mut kvm_cpuid2)
@@ -347,13 +274,6 @@ impl VirtualCPU {
         }
 
         Ok(())
-    }
-   
-    fn get_mmap_size(vcpu_fd: RawFd) -> Result<usize> {
-        unsafe {
-            uhyve::ioctl::get_vcpu_mmap_size(vcpu_fd, ptr::null_mut())
-                .map_err(|_| Error::IOCTL(NameIOCTL::GetVCPUMMAPSize)).map(|x| { x as usize})
-        }
     }
 
     fn get_mp_state(&self) -> Result<kvm_mp_state> {
@@ -495,7 +415,7 @@ impl VirtualCPU {
         Ok(())
     }
 
-    pub fn single_run(fd: RawFd, id: u32, state: &Arc<SharedState>) -> Result<proto::Return> {
+    pub fn single_run(fd: RawFd, id: u32, state: &SharedState) -> Result<proto::Return> {
         let ret = unsafe { uhyve::ioctl::run(fd, ptr::null_mut()) };
 
         //debug!("Single Run CPU {}", id);
@@ -527,7 +447,7 @@ impl VirtualCPU {
         }
     }
 
-    pub fn run_vcpu(state: Arc<SharedState>, id: u32, fd: i32) -> ExitCode {
+    pub fn run_vcpu(state: SharedState, id: u32, fd: RawFd) -> ExitCode {
         unsafe {
             while volatile_load(state.mboot.offset(0x20)) < id as u8 {
                 thread::yield_now();
@@ -537,11 +457,11 @@ impl VirtualCPU {
         }
 
         let tmp = signal::SigSet::empty();
-        let kvm_sigset = tmp.as_ref().clone();
+        let kvm_sigset = tmp.as_ref();
 
         let mut sig_mask = kvm_signal_mask::default();
         sig_mask.len = 8;
-        let sig_mask_data = kvm_signal_mask_data { info: sig_mask, sigset: kvm_sigset };
+        let sig_mask_data = kvm_signal_mask_data { info: sig_mask, sigset: *kvm_sigset };
 
         let _ = VirtualCPU::set_signal_mask_fd(fd, sig_mask_data);
 
@@ -585,10 +505,10 @@ impl VirtualCPU {
         ExitCode::Innocent
     }
 
-    pub fn run(&self) -> (JoinHandle<ExitCode>, pthread::Pthread, ::chan::Receiver<()>) {
+    pub fn run(&mut self) -> (JoinHandle<ExitCode>, pthread::Pthread, ::chan::Receiver<()>) {
         debug!("Run CPU {}", self.id);
 
-        let state = self.state.clone();
+        let state = self.state.take().unwrap();
         let id = self.id;
         let fd = self.vcpu_fd;
 
@@ -604,87 +524,9 @@ impl VirtualCPU {
 
         (handle, rpthread.recv().unwrap(), rdone)
     }
-    
-    pub fn init_sregs(&self) -> Result<kvm_sregs> {
-        let mut sregs = self.get_sregs()?;
-
-        debug!("Setup GDT");
-        self.setup_system_gdt(&mut sregs, 0)?;
-        debug!("Setup the page tables");
-        self.setup_system_page_tables(&mut sregs)?;
-        debug!("Set the system to 64bit");
-        self.setup_system_64bit(&mut sregs)?;
-
-        Ok(sregs)
-    }
-
-    pub fn setup_system_gdt(&self, sregs: &mut kvm_sregs, offset: u64) -> Result<()> {
-        let (mut data_seg, mut code_seg) = (kvm_segment::default(), kvm_segment::default());               
-
-        // create the GDT entries
-        let gdt_null = gdt::Entry::new(0, 0, 0);
-        let gdt_code = gdt::Entry::new(0xA09B, 0, 0xFFFFF);
-        let gdt_data = gdt::Entry::new(0xC093, 0, 0xFFFFF);
-
-        // apply the new GDTs to our guest memory
-        unsafe {
-            let ptr = self.state.guest_mem.offset(offset as isize) as *mut u64;
-            
-            *(ptr.offset(gdt::BOOT_NULL)) = gdt_null.as_u64();
-            *(ptr.offset(gdt::BOOT_CODE)) = gdt_code.as_u64();
-            *(ptr.offset(gdt::BOOT_DATA)) = gdt_data.as_u64();
-        }
-
-        gdt_code.apply_to_kvm(gdt::BOOT_CODE, &mut code_seg);
-        gdt_data.apply_to_kvm(gdt::BOOT_DATA, &mut data_seg);
-
-        sregs.gdt.base = offset;
-        sregs.gdt.limit = ((mem::size_of::<u64>() * gdt::BOOT_MAX) - 1) as u16;
-        sregs.cs = code_seg;
-        sregs.ds = data_seg;
-        sregs.es = data_seg;
-        sregs.fs = data_seg;
-        sregs.gs = data_seg;
-        sregs.ss = data_seg;
-
-        Ok(())
-    }
-
-    pub fn setup_system_page_tables(&self, sregs: &mut kvm_sregs) -> Result<()> {
-        unsafe {
-            let pml4 = self.state.guest_mem.offset(BOOT_PML4 as isize) as *mut u64;
-            let pdpte = self.state.guest_mem.offset(BOOT_PDPTE as isize) as *mut u64;
-            let pde = self.state.guest_mem.offset(BOOT_PDE as isize) as *mut u64;
-            
-            libc::memset(pml4 as *mut c_void, 0x00, 4096);
-            libc::memset(pdpte as *mut c_void, 0x00, 4096);
-            libc::memset(pde as *mut c_void, 0x00, 4096);
-            
-            *pml4 = (BOOT_PDPTE as u64) | (X86_PDPT_P | X86_PDPT_RW);
-            *pdpte = (BOOT_PDE as u64) | (X86_PDPT_P | X86_PDPT_RW);
-           
-            for i in 0..(GUEST_SIZE/GUEST_PAGE_SIZE) {
-                *(pde.offset(i as isize)) = (i*GUEST_PAGE_SIZE) as u64 | (X86_PDPT_P | X86_PDPT_RW | X86_PDPT_PS);
-            }
-        }
-
-        sregs.cr3 = BOOT_PML4 as u64;
-        sregs.cr4 |= X86_CR4_PAE;
-        sregs.cr0 |= X86_CR0_PG;
-
-        Ok(())
-    }
-
-    pub fn setup_system_64bit(&self, sregs: &mut kvm_sregs) -> Result<()> {
-        sregs.cr0 |= X86_CR0_PE;
-        sregs.cr4 |= X86_CR4_PAE;
-        sregs.efer |= EFER_LME|EFER_LMA;
-
-        Ok(())
-    }
 
     pub fn setup_cpuid(&self) -> Result<()> {
-        let mut kvm_cpuid = self.get_supported_cpuid()?;
+        let mut kvm_cpuid = self.kvm.get_supported_cpuid()?;
 
         for entry in kvm_cpuid.data[0 .. kvm_cpuid.header.nent as usize].iter_mut() {
             match entry.function {

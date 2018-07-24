@@ -1,5 +1,6 @@
 use std::io::{Read, Cursor};
 use std::mem;
+
 use byteorder::{ReadBytesExt, NativeEndian};
 
 use hermit::error::*;

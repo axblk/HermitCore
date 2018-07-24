@@ -2,24 +2,9 @@ use std::str::Lines;
 use std::fs::File;
 use std::io::{Read, Write};
 
-use super::vcpu::kvm_msr_data;
-use hermit::uhyve::kvm_header::*;
 use hermit::error::*;
 use hermit::utils;
-
-#[repr(C)]
-#[derive(Default)]
-pub struct vcpu_state {
-	pub msr_data: kvm_msr_data,
-	pub regs: kvm_regs,
-	pub sregs: kvm_sregs,
-	pub fpu: kvm_fpu,
-	pub lapic: kvm_lapic_state,
-	pub xsave: kvm_xsave,
-	pub xcrs: kvm_xcrs,
-	pub events: kvm_vcpu_events,
-	pub mp_state: kvm_mp_state,
-}
+use super::vcpu::vcpu_state;
 
 #[repr(C)]
 #[derive(Default)]
